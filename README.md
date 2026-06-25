@@ -81,6 +81,36 @@ pip install -r requirements.txt --break-system-packages
 **AnythingLLM** — connect via SSE transport (see AnythingLLM's MCP setup
 docs for the exact connection string format).
 
+## Best practice: caching URI → name lookups in conversation memory
+
+Replicon's API refers to projects, tasks, and users by opaque URIs (e.g.
+`urn:replicon-tenant:...:project:5611`) with no embedded name. If your AI
+agent calls `get_projects` / `get_tasks_for_project` / a user lookup every
+time it needs to resolve a URI it's already seen this session, that's wasted
+calls and slower responses — for no real benefit, since these names rarely
+change mid-conversation.
+
+Rather than building a caching layer into the server itself (which would
+risk silently serving a stale name for a renamed or archived project), ask
+your AI agent to hold this mapping in its own conversation memory instead.
+Add an instruction like this early in your session (or as a persistent
+instruction, if your client supports it):
+
+> When you resolve a Replicon project, task, or user URI to a human-readable
+> name using this MCP server, remember that name for the rest of this
+> conversation. Before calling a lookup tool to resolve a URI you've already
+> resolved, check your memory first instead of calling again. Likewise, if I
+> refer to a project or task by name, check whether you already have its URI
+> before searching for it again. If a name looks off, missing, or
+> inconsistent with what you'd expect, re-fetch it rather than trusting a
+> stale memory.
+
+This keeps a session fast without the server itself caching anything that
+could silently go out of date. Memory resets between sessions, so the first
+mention of any given project/task/user each session still costs one real
+lookup — that's expected, and it's what guarantees you're never working off
+outdated names.
+
 ## Notes for teammates installing their own copy
 
 - Each person runs their own instance with their own `.env` — credentials
