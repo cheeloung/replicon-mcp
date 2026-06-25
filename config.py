@@ -50,7 +50,38 @@ def get_auth_headers() -> dict:
     )
 
 
+# Tenant-specific extension field URI for the "Reference Tuleap" free-text column.
+# Discovered via probe on 2026-06-26 against tenant 7c3ab9f5ed424106aa53ee7b6ef2b1c7.
+# Override via REPLICON_TULEAP_FIELD_URI in .env if your tenant differs.
+TULEAP_FIELD_URI: str = os.getenv(
+    "REPLICON_TULEAP_FIELD_URI",
+    "urn:replicon-tenant:7c3ab9f5ed424106aa53ee7b6ef2b1c7"
+    ":object-extension-tag-definition:88c8d7db-6f71-4dde-8465-3420660e4fd6",
+)
+
+
+def get_user_uri() -> str:
+    """
+    Returns the authenticated user's Replicon URI.
+    Required for tools that operate on 'my' timesheet or filter pending
+    approvals by the current approver.
+
+    To find your URI: call TimeEntryService3/GetTimeEntriesForUserAndDateRange
+    for any week — your user URI appears in the 'user.uri' field of each entry.
+    Format: urn:replicon-tenant:{tenant_id}:user:{id}
+    """
+    uri = os.getenv("REPLICON_USER_URI", "").strip()
+    if not uri:
+        raise ValueError(
+            "REPLICON_USER_URI is not set in .env. "
+            "Set it to your Replicon user URI, e.g. "
+            "urn:replicon-tenant:abc123:user:42"
+        )
+    return uri
+
+
 def validate():
     """Call on startup to catch misconfigurations early."""
     get_base_url()
     get_auth_headers()
+    # User URI is validated lazily (some tools don't need it)

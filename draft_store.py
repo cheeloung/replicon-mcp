@@ -54,7 +54,7 @@ def _save(data: dict) -> None:
 def add_draft(user_uri: str, week_start: dict, week_end: dict, entry_date: dict,
               hours: float, project_uri: str, project_name: str,
               task_uri: str | None = None, task_name: str | None = None,
-              comments: str = "") -> dict:
+              comments: str = "", tuleap_ref: str = "") -> dict:
     """Stage a new draft entry. Returns the created draft record."""
     with _lock:
         data = _load()
@@ -70,6 +70,7 @@ def add_draft(user_uri: str, week_start: dict, week_end: dict, entry_date: dict,
             "task_uri": task_uri,
             "task_name": task_name,
             "comments": comments,
+            "tuleap_ref": tuleap_ref,  # "Reference Tuleap" extension field value
             "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "draft",  # draft -> pushed | failed
         }
