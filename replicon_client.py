@@ -11,7 +11,7 @@ API style notes:
 
 import uuid
 import requests
-from config import get_base_url, get_auth_headers
+from config import get_base_url, get_auth_headers, TULEAP_FIELD_URI
 
 
 class RepliconAPIError(Exception):
@@ -127,7 +127,7 @@ class RepliconClient:
 
     def put_time_entry(self, user_uri: str, entry_date: dict, hours: float,
                         project_uri: str, task_uri: str | None = None,
-                        comments: str = "") -> dict:
+                        comments: str = "", tuleap_ref: str = "") -> dict:
         """
         Add/update a single time entry. Uses TimeEntryService3.svc/PutTimeEntry —
         NOT PutStandardTimesheet2, which requires replacing the entire timesheet
@@ -161,6 +161,14 @@ class RepliconClient:
                 "value": {"text": comments},
             })
 
+        # Tuleap reference — stored in extensionFieldValues (separate from customMetadata)
+        extension_field_values = []
+        if tuleap_ref:
+            extension_field_values.append({
+                "definition": {"uri": TULEAP_FIELD_URI},
+                "textValue": tuleap_ref,
+            })
+
         whole_hours = int(hours)
         minutes = round((hours - whole_hours) * 60)
 
@@ -181,7 +189,7 @@ class RepliconClient:
                     "timePair": None,
                 },
                 "customMetadata": custom_metadata,
-                "extensionFieldValues": [],
+                "extensionFieldValues": extension_field_values,
             },
             "unitOfWorkId": str(uuid.uuid4()),
         }
@@ -191,14 +199,19 @@ class RepliconClient:
         """Delete a single time entry by its URI. Verified working."""
         return self._post("TimeEntryService3", "DeleteTimeEntry", {"timeEntryUri": time_entry_uri})
 
-    def get_time_entries_for_date_range(self, user_uri: str, start_date: dict, end_date: dict) -> dict:
-        """Read time entries for a user over a date range. Verified working."""
+    def get_time_entries_for_date_range(self, user_uri: str, start_date: dict, end_date: dict) -> list:
+        """
+        Read time entries for a user over a date range. Verified working.
+        Always returns a list — normalised here so callers never need to
+        type-check the _post return value.
+        """
         payload = {
             "user": {"uri": user_uri},
             "dateRange": {"startDate": start_date, "endDate": end_date},
             "asOf": None,
         }
-        return self._post("TimeEntryService3", "GetTimeEntriesForUserAndDateRange", payload)
+        result = self._post("TimeEntryService3", "GetTimeEntriesForUserAndDateRange", payload)
+        return result if isinstance(result, list) else []
 
     # ------------------------------------------------------------------
     # Submit for approval
@@ -232,18 +245,84 @@ class RepliconClient:
         return self._post("TimesheetApprovalService1", "Submit2", payload)
 
     # ------------------------------------------------------------------
+    # User lookup
+    # ------------------------------------------------------------------
+
+    USER_LIST_COLUMNS = [
+        "urn:replicon:user-list-column:user",  # confirmed via probe — same cell format as project list
+    ]
+
+    def find_users(self, name_search: str = "", page: int = 1, page_size: int = 25) -> dict:
+        """
+        Search for users by display name.
+
+        Verified endpoint: UserListService1.svc/GetData
+        Verified filter:   urn:replicon:user-list-filter:text
+                           operator: urn:replicon:filter-operator:text-search
+                           value:    {"text": "..."}
+        Cell format: same as ProjectListService1 — cells[].uri + cells[].textValue
+        """
+        filter_expression = None
+        if name_search:
+            filter_expression = {
+                "leftExpression": {
+                    "filterDefinitionUri": "urn:replicon:user-list-filter:text"
+                },
+                "operatorUri": "urn:replicon:filter-operator:text-search",
+                "rightExpression": {"value": {"text": name_search}},
+            }
+        payload = {
+            "page": page,
+            "pagesize": page_size,
+            "columnUris": self.USER_LIST_COLUMNS,
+            "sort": None,
+            "filterExpression": filter_expression,
+        }
+        return self._post("UserListService1", "GetData", payload)
+
+    # ------------------------------------------------------------------
     # Pending approvals (manager view)
     # ------------------------------------------------------------------
 
-    def get_team_approval_status_summary(self, user_uri: str) -> dict:
-        """Get counts of team timesheets by approval status, for the given manager."""
-        payload = {"userUri": user_uri}
-        return self._post("TimesheetApprovalService1", "GetTeamApprovalStatusSummary", payload)
+    # Column URIs confirmed via probe against live OLTPTimesheetListService1.
+    # 'timesheet'       → URI + slug (slug encodes owner + period start as "{slug}/{Y}-{M}-{D}")
+    # 'timesheet-owner' → owner URI + display name
+    # 'approval-status' → human-readable approval status label
+    TIMESHEET_LIST_COLUMNS = [
+        "urn:replicon:timesheet-list-column:timesheet",
+        "urn:replicon:timesheet-list-column:timesheet-owner",
+        "urn:replicon:timesheet-list-column:approval-status",
+    ]
 
-    def bulk_get_timesheet_approval_details(self, timesheet_uris: list[str]) -> dict:
-        """Get full approval detail for a specific set of timesheets."""
-        payload = {"timesheetUris": timesheet_uris}
-        return self._post("TimesheetApprovalService1", "BulkGetTimesheetApprovalDetails2", payload)
+    def get_pending_approvals_list(self, approver_uri: str,
+                                    page: int = 1, page_size: int = 50) -> dict:
+        """
+        List timesheets currently waiting for approval by the given approver.
+
+        Filter verified live (prior session):
+          filterDefinitionUri = urn:replicon:timesheet-list-filter:currently-waiting-on-approver
+          operatorUri         = urn:replicon:filter-operator:equal   (singular — not 'equals')
+          rightExpression     = {"value": {"uri": approver_uri}}
+
+        Note: the list response does NOT include a timesheet URI — only owner + period.
+        Call get_timesheet_for_date per row to get the URI before approving.
+        """
+        payload = {
+            "page": page,
+            "pagesize": page_size,
+            "columnUris": self.TIMESHEET_LIST_COLUMNS,
+            "sort": None,
+            "filterExpression": {
+                "leftExpression": {
+                    "filterDefinitionUri": (
+                        "urn:replicon:timesheet-list-filter:currently-waiting-on-approver"
+                    )
+                },
+                "operatorUri": "urn:replicon:filter-operator:equal",
+                "rightExpression": {"value": {"uri": approver_uri}},
+            },
+        }
+        return self._post("OLTPTimesheetListService1", "GetData", payload)
 
     # ------------------------------------------------------------------
     # Approve
@@ -270,12 +349,29 @@ class RepliconClient:
         }
         return self._post("TimesheetApprovalService1", "Approve", payload)
 
-    def create_approve_batch(self, timesheet_uris: list[str], comments: str = "") -> dict:
-        """Create a batch approval job for multiple timesheets."""
-        payload = {"timesheetUris": timesheet_uris, "comments": comments}
-        return self._post("TimesheetApprovalService1", "CreateApproveBatch", payload)
+    def reopen_timesheet(self, timesheet_uri: str, current_status_uri: str,
+                          comments: str = "", change_reason: str = "") -> dict:
+        """
+        Reopen a submitted timesheet (pull it back from 'waiting for approval'
+        to 'open' so entries can be corrected).
 
-    def execute_timesheet_approval_batch(self, batch_uri: str) -> dict:
-        """Execute a previously created approval batch."""
-        payload = {"timesheetApprovalBatchUri": batch_uri}
-        return self._post("TimesheetApprovalService1", "ExecuteTimesheetApprovalBatch2", payload)
+        Operation confirmed via probe: TimesheetApprovalService1.svc/Reopen
+        (HTTP 400 "Invalid Tenant Selected" on dummy URI = endpoint exists).
+
+        current_status_uri must be TIMESHEET_STATUS_WAITING — caller fetches
+        it fresh immediately before calling this.
+        """
+        if current_status_uri != TIMESHEET_STATUS_WAITING:
+            raise TimesheetStateError(
+                f"Cannot reopen: timesheet status is '{current_status_uri}', "
+                f"expected '{TIMESHEET_STATUS_WAITING}' (submitted, awaiting approval). "
+                f"Only submitted timesheets can be reopened."
+            )
+        payload = {
+            "timesheetUri": timesheet_uri,
+            "unitOfWorkId": str(uuid.uuid4()),
+            "comments": comments,
+            "changeReason": change_reason,
+        }
+        return self._post("TimesheetApprovalService1", "Reopen", payload)
+
