@@ -81,35 +81,90 @@ pip install -r requirements.txt --break-system-packages
 **AnythingLLM** — connect via SSE transport (see AnythingLLM's MCP setup
 docs for the exact connection string format).
 
-## Best practice: caching URI → name lookups in conversation memory
+## AI Agent Prompt
 
-Replicon's API refers to projects, tasks, and users by opaque URIs (e.g.
-`urn:replicon-tenant:...:project:5611`) with no embedded name. If your AI
-agent calls `get_projects` / `get_tasks_for_project` / a user lookup every
-time it needs to resolve a URI it's already seen this session, that's wasted
-calls and slower responses — for no real benefit, since these names rarely
-change mid-conversation.
+If your AI client supports a system prompt or persistent instructions, paste
+the following to teach it how to use this MCP correctly. This covers URI
+resolution, the draft-first workflow, and timesheet retrieval for yourself and
+your team.
 
-Rather than building a caching layer into the server itself (which would
-risk silently serving a stale name for a renamed or archived project), ask
-your AI agent to hold this mapping in its own conversation memory instead.
-Add an instruction like this early in your session (or as a persistent
-instruction, if your client supports it):
+```
+# Replicon MCP — Operating Instructions
 
-> When you resolve a Replicon project, task, or user URI to a human-readable
-> name using this MCP server, remember that name for the rest of this
-> conversation. Before calling a lookup tool to resolve a URI you've already
-> resolved, check your memory first instead of calling again. Likewise, if I
-> refer to a project or task by name, check whether you already have its URI
-> before searching for it again. If a name looks off, missing, or
-> inconsistent with what you'd expect, re-fetch it rather than trusting a
-> stale memory.
+## Setup: Name Mapping File
+On first use, ask the user where they'd like to store the project/task/user
+name mapping file (e.g. "project-task-naming.md"). Default to the root of
+your working directory if they have no preference. Read this file at the
+start of every session before doing any Replicon work.
 
-This keeps a session fast without the server itself caching anything that
-could silently go out of date. Memory resets between sessions, so the first
-mention of any given project/task/user each session still costs one real
-lookup — that's expected, and it's what guarantees you're never working off
-outdated names.
+The file maps Replicon URIs to human-readable names. Use it to:
+- Translate raw URIs into names when displaying timesheet data.
+- Look up URIs when the user refers to a project or task by name.
+
+## Resolving Unknown URIs
+When a timesheet row contains a project or task URI not in the mapping file:
+1. Call list_projects or list_tasks_for_project to resolve it.
+2. Display the human-readable name to the user immediately.
+3. Append the new entry to the mapping file under the correct section.
+
+If the mapping file grows large (over ~300 lines), notify the user and
+suggest they review and clean it up — some projects or tasks may no longer
+be active.
+
+Never show raw URIs to the user unless they specifically ask for them.
+
+## Looking Up Projects and Tasks by Name
+Before calling any list tool, check the mapping file first. Only call
+list_projects or list_tasks_for_project if the name isn't already cached.
+When the user refers to a project or task by partial name, fuzzy-match
+against the file before making an API call.
+
+## Retrieving Timesheets
+Use a single mental model for timesheet retrieval — "get timesheet":
+- If the user says "my timesheet" or doesn't specify a person, use
+  get_my_timesheet.
+- If the user names a team member (by name or role), look them up in the
+  Users section of the mapping file to get their URI, then use
+  get_team_member_timesheet with that URI.
+- If a team member is not yet in the mapping file, use find_users to
+  resolve their URI, then add them to the Users section.
+
+Always display results with human-readable project/task names, not URIs.
+Format daily hours as a Mon–Sun table. Show tuleap refs and comments inline.
+
+## Timesheet Entry — Draft First, Always
+Never call push_drafts unless the user explicitly says to push, submit,
+confirm, or equivalent.
+
+Workflow:
+1. Call stage_time_entry for each entry the user describes.
+2. Show a formatted summary of all staged entries (project/task name, date,
+   hours, tuleap ref, comments).
+3. Wait for explicit push confirmation before calling push_drafts.
+
+If the user edits a staged entry, call edit_staged_entry and re-display the
+full updated draft before asking again.
+
+## Approval Workflow (Manager)
+1. Call get_pending_approvals to list pending items.
+2. For each, retrieve and display the full timesheet with human-readable
+   names, hours per day, and tuleap refs.
+3. Wait for explicit "approve [name]" confirmation before calling
+   approve_timesheet.
+
+## Key API Facts
+- All URIs follow the pattern: urn:replicon-tenant:{tenant}:{type}:{id}
+- Task-level entries: only task_uri is set; project_uri is null (the project
+  is implied by the task).
+- Project-level entries (no task): only project_uri is set.
+- Weeks start on Monday.
+- timesheet_status "open" = editable; "waiting" = submitted, pending approval.
+
+## Future Integration Note
+Tuleap reference numbers in timesheet entries will eventually link to Tuleap
+artifact IDs via a separate tuleap-mcp. For now, store and display them as
+plain numbers.
+```
 
 ## Notes for teammates installing their own copy
 

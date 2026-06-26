@@ -229,18 +229,28 @@ def shape_user_list(raw_response: dict) -> list[dict]:
 # Pending approvals shaping (manager view)
 # ---------------------------------------------------------------------------
 
-def _extract_column_value(row_data: list[dict], column_uri_suffix: str) -> dict | None:
+def _parse_period_from_slug(slug: str) -> tuple[dict | None, dict | None]:
     """
-    Pull a column value out of a list-service row by matching the tail of the
-    column URI. Returns the raw value dict, or None if not found.
+    Parse the period start (and derived end) from an OLTPTimesheetListService1
+    timesheet cell slug.
 
-    List service rows look like:
-      [{"columnUri": "urn:replicon:timesheet-list-column:owner", "value": {...}}, ...]
+    Slug format confirmed from live API: "{owner-slug}/{year}-{month}-{day}"
+    Example: ".seayeelimkranzwolfecom/2026-6-15"
+
+    Returns (period_start, period_end) as date dicts, or (None, None) on failure.
     """
-    for col in row_data:
-        if col.get("columnUri", "").endswith(column_uri_suffix):
-            return col.get("value")
-    return None
+    from datetime import date, timedelta
+    try:
+        date_part = slug.rsplit("/", 1)[-1]  # "2026-6-15"
+        y, m, d = (int(x) for x in date_part.split("-"))
+        start = date(y, m, d)
+        end = start + timedelta(days=6)
+        return (
+            {"year": start.year, "month": start.month, "day": start.day},
+            {"year": end.year,   "month": end.month,   "day": end.day},
+        )
+    except (ValueError, IndexError):
+        return None, None
 
 
 def shape_pending_approvals_list(raw_list_response: dict) -> list[dict]:
@@ -248,51 +258,60 @@ def shape_pending_approvals_list(raw_list_response: dict) -> list[dict]:
     Shape the raw OLTPTimesheetListService1/GetData response into a clean list
     of pending approval items.
 
-    The list service returns owner + period info but NOT a timesheet URI —
-    callers must call get_timesheet_for_date per item to get the URI before
-    approving. This function deliberately omits the URI; the MCP tool layer
-    adds it after the secondary lookup.
+    Cell format confirmed via probe (Jun 2026): rows use cells[] keyed by
+    objectType (no columnUri on the cell). Three columns requested and their
+    confirmed objectTypes:
+      urn:replicon:object-type:timesheet       → URI + slug ("{owner}/{Y}-{M}-{D}")
+      urn:replicon:object-type:user            → owner URI + textValue name
+      urn:replicon:object-type:approval-status → textValue label
+
+    The timesheet URI is available directly in the list — no secondary
+    get_timesheet_for_date call needed for the approval workflow.
 
     Output: list of:
     {
-        "owner_uri":      str,
-        "owner_name":     str,
-        "period_start":   {"year": int, "month": int, "day": int},
-        "period_end":     {"year": int, "month": int, "day": int},
-        "approval_status": str | None,  # status label if returned by column
+        "owner_uri":       str,
+        "owner_name":      str,
+        "timesheet_uri":   str,
+        "period_start":    {"year": int, "month": int, "day": int} | None,
+        "period_end":      {"year": int, "month": int, "day": int} | None,
+        "approval_status": str | None,
     }
     """
     rows = raw_list_response.get("rows", [])
-    if not rows and "d" in raw_list_response:
-        # Handle response still wrapped in 'd'
-        rows = raw_list_response["d"].get("rows", [])
 
     results = []
     for row in rows:
-        row_data = row.get("rowData", [])
+        cells = row.get("cells", [])
 
-        owner_val = _extract_column_value(row_data, ":owner")
-        period_val = _extract_column_value(row_data, ":period")
-        status_val = _extract_column_value(row_data, ":timesheet-status")
+        # Match cells by objectType — order is not guaranteed
+        timesheet_cell = None
+        owner_cell = None
+        status_cell = None
+        for cell in cells:
+            obj = cell.get("objectType", "")
+            if obj == "urn:replicon:object-type:timesheet":
+                timesheet_cell = cell
+            elif obj == "urn:replicon:object-type:user":
+                owner_cell = cell
+            elif obj == "urn:replicon:object-type:approval-status":
+                status_cell = cell
 
-        if not owner_val or not period_val:
-            # Malformed row — skip rather than crash
-            continue
+        if not timesheet_cell or not owner_cell:
+            continue  # malformed row — skip rather than crash
 
-        owner_uri = owner_val.get("uri", "")
-        owner_name = owner_val.get("displayText", owner_uri)
-
-        period = period_val if isinstance(period_val, dict) else {}
-        period_start = period.get("startDate") or period.get("start") or {}
-        period_end = period.get("endDate") or period.get("end") or {}
+        period_start, period_end = _parse_period_from_slug(
+            timesheet_cell.get("slug", "")
+        )
 
         results.append({
-            "owner_uri": owner_uri,
-            "owner_name": owner_name,
+            "owner_uri": owner_cell.get("uri", ""),
+            "owner_name": owner_cell.get("textValue", ""),
+            "timesheet_uri": timesheet_cell.get("uri", ""),
             "period_start": period_start,
             "period_end": period_end,
             "approval_status": (
-                status_val.get("displayText") if isinstance(status_val, dict) else None
+                status_cell.get("textValue") if status_cell else None
             ),
         })
 

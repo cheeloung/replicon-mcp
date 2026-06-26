@@ -545,45 +545,17 @@ def get_pending_approvals() -> str:
     """
     List all timesheets currently waiting for your approval.
 
-    For each result, returns the owner's name/URI, the week period, and
-    a timesheet_uri pre-fetched for you (needed by approve_timesheet).
+    For each result, returns the owner's name/URI, the week period,
+    the timesheet_uri (needed by approve_timesheet), and the approval status.
 
-    If there are many pending timesheets, use get_team_member_timesheet to
-    drill into a specific person's entries before approving.
+    Use get_team_member_timesheet to drill into a specific person's entries
+    before approving.
 
     Returns a list of pending approval items. Empty list = nothing pending.
     """
     raw_list = _client.get_pending_approvals_list(_my_uri)
     items = response_shapes.shape_pending_approvals_list(raw_list)
-
-    # Enrich each item with the timesheet URI (requires a secondary call per item)
-    enriched = []
-    for item in items:
-        period_start = item["period_start"]
-        if not period_start:
-            enriched.append({**item, "timesheet_uri": None, "timesheet_status": None})
-            continue
-
-        try:
-            details = _client.get_timesheet_for_date(item["owner_uri"], period_start)
-            ts = details.get("timesheet", {})
-            enriched.append({
-                **item,
-                "timesheet_uri": ts.get("uri"),
-                "timesheet_status": ts.get("statusUri"),
-            })
-        except RepliconAPIError as e:
-            enriched.append({
-                **item,
-                "timesheet_uri": None,
-                "timesheet_status": None,
-                "lookup_error": str(e),
-            })
-
-    return _pretty({
-        "pending_count": len(enriched),
-        "pending": enriched,
-    })
+    return _pretty({"pending_count": len(items), "pending": items})
 
 
 @mcp.tool()

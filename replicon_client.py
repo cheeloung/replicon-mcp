@@ -284,13 +284,14 @@ class RepliconClient:
     # Pending approvals (manager view)
     # ------------------------------------------------------------------
 
-    # Verified column URIs for OLTPTimesheetListService1 (confirmed via
-    # GetAllColumns in prior session — these return owner object, period
-    # date range, and current approval status label respectively).
+    # Column URIs confirmed via probe against live OLTPTimesheetListService1.
+    # 'timesheet'       → URI + slug (slug encodes owner + period start as "{slug}/{Y}-{M}-{D}")
+    # 'timesheet-owner' → owner URI + display name
+    # 'approval-status' → human-readable approval status label
     TIMESHEET_LIST_COLUMNS = [
-        "urn:replicon:timesheet-list-column:owner",
-        "urn:replicon:timesheet-list-column:period",
-        "urn:replicon:timesheet-list-column:timesheet-status",
+        "urn:replicon:timesheet-list-column:timesheet",
+        "urn:replicon:timesheet-list-column:timesheet-owner",
+        "urn:replicon:timesheet-list-column:approval-status",
     ]
 
     def get_pending_approvals_list(self, approver_uri: str,
