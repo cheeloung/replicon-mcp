@@ -5,10 +5,15 @@ These functions take raw API payloads and return structured dicts suitable for
 returning from MCP tools. The goal is to hide Replicon's internal wire format
 from the AI agent and give it only what it needs to reason and act.
 
-Grouping rule for time entries (verified against live API, Jun 2026):
-  - Each raw entry carries a `urn:replicon:widget-ui-metadata-key:row-number`
-    metadata value. This is the canonical grouping key — one row-number = one
-    visual row in the Replicon timesheet UI.
+Grouping rule for time entries (verified against live API, Jun–Jul 2026):
+  - Entries created through the Replicon UI carry a
+    `urn:replicon:widget-ui-metadata-key:row-number` metadata value. Where
+    present, this is the canonical grouping key — one row-number = one visual
+    row in the Replicon timesheet UI.
+  - Entries created via the API (our own TimeEntryService3/PutTimeEntry pushes)
+    carry NO row-number — it is UI widget metadata that Replicon does not
+    assign server-side. These entries are grouped by (project_uri, task_uri)
+    into synthetic rows with row_number=None instead of being dropped.
   - Entries with interval=null are PLACEHOLDER records: the row is allocated for
     that week but has no hours on that day. They are skipped when computing hours
     but their URIs are still tracked (needed for delete operations).
@@ -49,13 +54,19 @@ def _date_key(entry_date: dict) -> str:
 def shape_time_entries(raw_entries: list[dict]) -> list[dict]:
     """
     Group raw GetTimeEntriesForUserAndDateRange entries into one dict per
-    timesheet row, sorted by row_number.
+    timesheet row.
+
+    Grouping key: row-number metadata where present (UI-created entries);
+    (project_uri, task_uri) otherwise (API-created entries, which carry no
+    row-number — see module docstring). Numbered rows sort first, then
+    synthetic rows by project/task URI.
 
     Input: the 'd' array from TimeEntryService3/GetTimeEntriesForUserAndDateRange.
 
     Output: list of row dicts:
     {
-        "row_number": float,        # Replicon's internal row identifier
+        "row_number": float | None, # Replicon's row identifier; None for
+                                    # rows grouped from API-created entries
         "project_uri": str | None,  # set when entry is at project level (no task)
         "task_uri":    str | None,  # set when entry is at task level
         "daily_hours": {            # only days with actual hours (null/zero excluded)
@@ -70,8 +81,8 @@ def shape_time_entries(raw_entries: list[dict]) -> list[dict]:
     Rows with 0 total hours are included — they represent allocated rows with no
     time logged this week (still visible as empty rows in the UI).
     """
-    # row_number (float) → accumulated row data
-    rows: dict[float, dict] = defaultdict(lambda: {
+    # grouping key (see below) → accumulated row data
+    rows: dict[tuple, dict] = defaultdict(lambda: {
         "row_number": None,
         "project_uri": None,
         "task_uri": None,
@@ -91,11 +102,19 @@ def shape_time_entries(raw_entries: list[dict]) -> list[dict]:
         }
 
         row_num = meta.get("row-number", {}).get("number")
-        if row_num is None:
-            # No row-number → not a standard time entry row; skip.
-            continue
+        if row_num is not None:
+            key = ("row", row_num)
+        else:
+            # API-created entry (no widget row-number) — group by project+task.
+            # Kept separate from numbered rows: row-number is authoritative
+            # where present, and the same project/task can span multiple rows.
+            key = (
+                "api",
+                meta.get("project", {}).get("uri"),
+                meta.get("task", {}).get("uri"),
+            )
 
-        row = rows[row_num]
+        row = rows[key]
         row["row_number"] = row_num
 
         # project_uri and task_uri are consistent across all entries in a group;
@@ -137,8 +156,13 @@ def shape_time_entries(raw_entries: list[dict]) -> list[dict]:
                     break
         # else: placeholder entry (interval=null or 0h) — tracked via all_entry_uris only
 
-    # Sort by row_number for stable, predictable output order
-    return sorted(rows.values(), key=lambda r: r["row_number"] or 0)
+    # Stable output order: numbered rows first (by row_number), then
+    # synthetic API rows (by project/task URI)
+    return sorted(
+        rows.values(),
+        key=lambda r: (r["row_number"] is None, r["row_number"] or 0,
+                       r["project_uri"] or "", r["task_uri"] or ""),
+    )
 
 
 # ---------------------------------------------------------------------------
