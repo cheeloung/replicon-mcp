@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 drafts.json
 project-task-naming.md
+.DS_Store

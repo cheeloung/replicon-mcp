@@ -114,7 +114,8 @@ def get_my_timesheet(week_date: str) -> str:
     Returns JSON with:
         timesheet_status  — current status URI (open / waiting / etc.)
         timesheet_uri     — URI needed for submit_timesheet
-        committed_rows    — shaped time entry rows (grouped by row-number)
+        committed_rows    — shaped time entry rows (grouped by row-number when
+                            present, else by project+task with row_number=null)
         drafts            — local staged entries not yet pushed
         week_start        — computed Monday of the week
         week_end          — computed Sunday of the week
