@@ -191,5 +191,8 @@ plain numbers.
   push drafts to Replicon — verified working.
 - ✅ Create a task under a project (create_task) — verified end-to-end against
   a live create/read/delete round-trip (uses the TaskService1 task-draft flow).
-- ⏳ Submit for approval / approve timesheets — built, not yet verified
-  against a real write. Treat with extra caution until confirmed.
+- ✅ Submit for approval (submit_timesheet) — verified end-to-end against a
+  live tenant, including the required per-time-entry-revision-group submit
+  step (TimeEntryRevisionGroupApprovalService1/Submit) before the
+  timesheet-level submit (TimesheetApprovalService1/Submit2).
+- ⏳ Approve timesheets — still not yet verified against a real write.

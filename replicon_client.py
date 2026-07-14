@@ -44,7 +44,11 @@ class RepliconClient:
         try:
             response.raise_for_status()
         except requests.HTTPError as e:
-            raise RepliconAPIError(f"HTTP error calling {service}/{operation}: {e}") from e
+            detail = self._extract_error_detail(response)
+            message = f"HTTP error calling {service}/{operation}: {e}"
+            if detail:
+                message += f" — {detail}"
+            raise RepliconAPIError(message) from e
 
         body = response.json()
         if isinstance(body, dict) and body.get("error"):
@@ -52,6 +56,27 @@ class RepliconClient:
 
         # Most operations wrap the real payload in "d"; some return raw lists/objects
         return body.get("d", body) if isinstance(body, dict) else body
+
+    @staticmethod
+    def _extract_error_detail(response: requests.Response) -> str | None:
+        """
+        Replicon error responses carry human-readable detail in
+        error.details.notifications[].displayText (confirmed live, e.g.
+        "Time Entry already submitted." from TimeEntryRevisionGroupApprovalService1).
+        raise_for_status() only gives the generic HTTP reason phrase, so pull
+        this out separately to make RepliconAPIError messages actionable
+        instead of just "400 Client Error: Bad Request".
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        error = body.get("error") if isinstance(body, dict) else None
+        if not isinstance(error, dict):
+            return None
+        notifications = (error.get("details") or {}).get("notifications") or []
+        texts = [n["displayText"] for n in notifications if n.get("displayText")]
+        return "; ".join(texts) if texts else error.get("reason")
 
     # ------------------------------------------------------------------
     # Projects
@@ -321,6 +346,29 @@ class RepliconClient:
             "changeReason": change_reason,
         }
         return self._post("TimesheetApprovalService1", "Submit2", payload)
+
+    def submit_time_entry_revision_group(self, revision_group_uri: str, comments: str = "") -> dict:
+        """
+        Submit a single time entry revision group for approval — the
+        prerequisite step Replicon requires (on this tenant) before the
+        timesheet-level Submit2 will succeed. Confirmed live against
+        TimeEntryRevisionGroupApprovalService1.svc/Submit.
+
+        Same call shape as submit_timesheet/approve_timesheet/reopen_timesheet:
+        unitOfWorkId is a fresh caller-generated idempotency key per call.
+
+        No status precondition (unlike submit_timesheet/approve_timesheet) —
+        we have no confirmed status URI for revision groups. Callers should
+        treat RepliconAPIError here as soft failure (the group may already
+        be submitted from a prior attempt) and not let it block the overall
+        submit_timesheet flow.
+        """
+        payload = {
+            "timeEntryRevisionGroupUri": revision_group_uri,
+            "unitOfWorkId": str(uuid.uuid4()),
+            "comments": comments,
+        }
+        return self._post("TimeEntryRevisionGroupApprovalService1", "Submit", payload)
 
     # ------------------------------------------------------------------
     # User lookup

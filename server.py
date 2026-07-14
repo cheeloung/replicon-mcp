@@ -501,36 +501,35 @@ def submit_timesheet(week_date: str, comments: str = "") -> str:
     """
     Submit your timesheet for the given week for approval.
 
+    Replicon requires every underlying time entry to be individually
+    submitted before the timesheet itself can be submitted. This tool does
+    that automatically — submitting each time entry revision group for the
+    week, then the timesheet itself — mirroring the "Submit X time entry(s)"
+    + "Submit timesheet" flow in the Replicon web UI. Nothing else needs to
+    be called first.
+
     The timesheet must be in 'open' status — if it's already submitted or
-    in another state, this will return an error. Fetch fresh status via
+    in another state, this returns an error. Fetch fresh status via
     get_my_timesheet immediately before calling this to confirm.
 
-    CAUTION: This is a real write to Replicon. Confirm with the user first.
+    CAUTION: Real writes to Replicon (one per time entry revision group,
+    then the timesheet). Confirm with the user first.
 
     Args:
         week_date: Any date in the target week ("YYYY-MM-DD").
-        comments:  Optional submission comments.
+        comments:  Optional submission comments (applied to both the
+                   entry-level and timesheet-level submits).
 
-    Returns the API response on success, or a clear error message.
+    Returns which revision groups were submitted/failed plus the
+    timesheet-level API response, or a clear error message.
     """
-    week_start, _ = _week_bounds(week_date)
-
-    # Fetch fresh timesheet details to get current status and URI
-    details = _client.get_timesheet_for_date(_my_uri, week_start)
-    timesheet = details.get("timesheet", {})
-    timesheet_uri = timesheet.get("uri")
-    current_status = timesheet.get("statusUri")
-
-    if not timesheet_uri:
-        return _pretty({"error": "Could not retrieve timesheet URI. Does a timesheet exist for this week?"})
+    week_start, week_end = _week_bounds(week_date)
 
     try:
-        result = _client.submit_timesheet(
-            timesheet_uri=timesheet_uri,
-            current_status_uri=current_status,
-            comments=comments,
+        result = timesheet_workflow.submit_timesheet(
+            _client, _my_uri, week_start, week_end, comments=comments
         )
-        return _pretty({"submitted": True, "response": result})
+        return _pretty({"submitted": True, **result})
     except (TimesheetStateError, RepliconAPIError) as e:
         return _pretty({"error": str(e)})
 

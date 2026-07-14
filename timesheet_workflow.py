@@ -8,7 +8,12 @@ fresh from Replicon and merges with local drafts — never shows
 drafts-only or Replicon-only by accident.
 """
 
-from replicon_client import RepliconClient, TimesheetStateError
+from replicon_client import (
+    RepliconClient,
+    RepliconAPIError,
+    TimesheetStateError,
+    TIMESHEET_STATUS_OPEN,
+)
 import draft_store
 
 
@@ -128,4 +133,69 @@ def push_drafts(client: RepliconClient, user_uri: str,
         "block_reason": None,
         "succeeded": succeeded,
         "failed": failed,
+    }
+
+
+def submit_timesheet(client: RepliconClient, user_uri: str,
+                      week_start: dict, week_end: dict,
+                      comments: str = "") -> dict:
+    """
+    Submit the week's timesheet for approval — submitting each underlying
+    time entry revision group first. Mirrors the "Submit X time entry(s)"
+    + "Submit timesheet" two-button flow in the Replicon web UI, which this
+    tenant requires (see replicon_client.submit_time_entry_revision_group).
+
+    - Fetches timesheet details fresh (status + uri).
+    - If status is 'open', collects distinct revisionGroupUri values from
+      this week's committed entries (get_time_entries_for_date_range — the
+      field is already present on every raw entry) and submits each one.
+      Per-group failure is soft: recorded, doesn't stop the rest or block
+      the timesheet-level submit that follows.
+    - Always attempts the existing client.submit_timesheet() afterwards;
+      its TimesheetStateError/RepliconAPIError propagate unchanged.
+
+    Returns:
+        {
+            "revision_groups_submitted": [uri, ...],
+            "revision_groups_failed": [{"uri": ..., "error": ...}, ...],
+            "revision_groups_total": int,
+            "timesheet_response": dict,   # raw Submit2 response
+        }
+    """
+    timesheet_details = client.get_timesheet_for_date(user_uri, week_start)
+    timesheet = timesheet_details.get("timesheet", {})
+    timesheet_uri = timesheet.get("uri")
+    current_status = timesheet.get("statusUri")
+
+    if not timesheet_uri:
+        raise TimesheetStateError(
+            "Could not retrieve timesheet URI. Does a timesheet exist for this week?"
+        )
+
+    revision_groups_submitted = []
+    revision_groups_failed = []
+
+    if current_status == TIMESHEET_STATUS_OPEN:
+        entries = client.get_time_entries_for_date_range(user_uri, week_start, week_end)
+        revision_group_uris = sorted({
+            e["revisionGroupUri"] for e in entries if e.get("revisionGroupUri")
+        })
+        for uri in revision_group_uris:
+            try:
+                client.submit_time_entry_revision_group(uri, comments=comments)
+                revision_groups_submitted.append(uri)
+            except RepliconAPIError as e:
+                revision_groups_failed.append({"uri": uri, "error": str(e)})
+
+    timesheet_response = client.submit_timesheet(
+        timesheet_uri=timesheet_uri,
+        current_status_uri=current_status,
+        comments=comments,
+    )
+
+    return {
+        "revision_groups_submitted": revision_groups_submitted,
+        "revision_groups_failed": revision_groups_failed,
+        "revision_groups_total": len(revision_groups_submitted) + len(revision_groups_failed),
+        "timesheet_response": timesheet_response,
     }
