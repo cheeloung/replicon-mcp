@@ -6,6 +6,10 @@ sent, and push them to Replicon only when you explicitly say so. It can
 also help review and approve timesheets pending your approval (manager
 flow — still being finalized).
 
+This guide assumes no prior technical experience. If you get stuck, check
+the [Troubleshooting](#troubleshooting) section near the bottom — it covers
+the most common problems people hit on Windows.
+
 ## Why staging instead of direct writes?
 
 This server deliberately does **not** expose a "write directly to Replicon"
@@ -29,57 +33,207 @@ timesheet, and review everything before it becomes real.
 
 ## Setup
 
-### 1. Get your Replicon Bearer Token
+Follow these steps in order. Each one builds on the last — don't skip ahead.
 
-Go to your tenant's Security API docs page and generate an access token:
+### Step 1 — Check what you need
 
-**https://eu1.replicon.com/services/docs/security.html**
+- **Python 3.10 or newer.** This project uses newer Python syntax, so an
+  older Python (3.9 or earlier — common on some work laptops) will fail
+  with a confusing `SyntaxError`. Step 3 below covers checking/installing it.
+- **Your normal Replicon login** (the email/username and password you use
+  to log into the Replicon website), or, if you're technical, a bearer
+  token — both are covered in Step 6.
+- **Claude Desktop** (or another MCP-compatible AI app) already installed.
 
-(Replace `eu1` with your own swimlane if different — check your Replicon
-login URL, e.g. `https://eu1.replicon.com/YourCompany/home/`.)
+### Step 2 — Get the code
 
-Under **Creating and revoking access tokens**, use
-`POST /AuthenticationService1.svc/CreateAccessToken2`. You can omit the
-`lifetime` field for a token with no expiry.
+**If you're not familiar with git (recommended for most people):**
+1. Go to this project's GitHub page in your browser.
+2. Click the green **Code** button, then **Download ZIP**.
+3. Find the downloaded `.zip` file (usually in your Downloads folder) and
+   extract it:
+   - **Windows:** right-click the file → **Extract All...** → choose a
+     simple location like `C:\Users\YourName\Documents\replicon-mcp` (avoid
+     folders with unusual characters or very long paths).
+   - **Mac:** double-click the file to extract it.
+4. Remember exactly where you extracted it — you'll need this full path
+   again in Step 7.
 
-### 2. Configure `.env`
-
-Copy `.env.example` to `.env` and fill in:
-
+**If you're comfortable with git:**
 ```bash
-cp .env.example .env
+git clone <this repository's URL>
 ```
 
-```
-REPLICON_BASE_URL=https://eu1.replicon.com
-REPLICON_BEARER_TOKEN=<paste your generated token here>
-```
+### Step 3 — Install Python
 
-(Basic Auth fields are an optional fallback — only needed if you're not
-using a bearer token.)
+Skip this step if you already have Python 3.10+ (check by opening a
+terminal and running `python --version`, or `python3 --version` on Mac).
 
-### 3. Install dependencies
+**Windows:**
+1. Go to **python.org/downloads** and download the latest Python 3
+   installer.
+2. Run the installer. On the very first screen, **make sure to check the
+   box "Add python.exe to PATH"** before clicking Install — this is the
+   single most common thing people miss, and it causes the
+   `'python' is not recognized` error later (see Troubleshooting).
+3. Open a new **Command Prompt** or **PowerShell** window (search for it in
+   the Start menu) and confirm it worked:
+   ```
+   python --version
+   ```
+   This should print something like `Python 3.12.x`. If it prints an error
+   instead, see Troubleshooting.
 
+**Mac:**
+System Python on macOS is often too old (3.9, which this project can't
+use). Install a current version via [Homebrew](https://brew.sh):
 ```bash
-pip install -r requirements.txt --break-system-packages
+brew install python@3.11
+```
+Then use `python3.11` (or check `python3 --version` — if it's already 3.10+,
+plain `python3` is fine).
+
+### Step 4 — Open a terminal in the project folder
+
+- **Windows:** open the folder you extracted in Step 2 in File Explorer,
+  then type `cmd` into the address bar at the top and press Enter — this
+  opens a Command Prompt already inside that folder. (Or hold Shift, right-click
+  an empty spot in the folder, and choose "Open PowerShell window here".)
+- **Mac:** open Terminal, then type `cd ` (with a trailing space) and drag
+  the extracted folder into the Terminal window to fill in its path, then
+  press Enter.
+
+All the commands below assume you're in this folder.
+
+### Step 5 — Create a virtual environment and install dependencies
+
+A virtual environment keeps this project's Python packages separate from
+everything else on your computer — it avoids version conflicts and means
+you never need any special "override" flags.
+
+**Windows (Command Prompt):**
+```
+python -m venv venv
+venv\Scripts\activate.bat
+pip install -r requirements.txt
 ```
 
-### 4. Connect to your AI agent
+**Windows (PowerShell):**
+```
+python -m venv venv
+venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+If `Activate.ps1` gives an error about running scripts being disabled, see
+Troubleshooting — there's a one-line fix.
 
-**Claude Desktop** — add to your MCP config (stdio transport):
+**Mac:**
+```bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+You'll know the virtual environment is active because your terminal prompt
+will show `(venv)` at the start of the line. **Every time you reopen a
+terminal to work with this project, you need to re-run the `activate`
+command** (but you only need to run `pip install` once).
+
+### Step 6 — Set up Replicon access
+
+You need two things from Replicon: a way to authenticate, and your own
+user URI. There are two ways to authenticate — pick one.
+
+**Option A — Basic Auth (recommended, easiest):** just your normal Replicon
+login. No extra setup needed — you'll fill in three values directly in
+Step 7 (`.env` file):
+- Your **company key** — look at the URL you use to log into Replicon,
+  e.g. `https://eu1.replicon.com/Kranz/home/` → your company key is `Kranz`.
+- Your Replicon **username** (usually your email) and **password**.
+
+**Option B — Bearer token (advanced, optional):** a token that doesn't
+require storing your password, and that you can revoke independently. This
+needs a manual API call, so it's better suited to a technical teammate. Go
+to your tenant's Security API docs page (replace `eu1` with your own
+swimlane if different):
+**https://eu1.replicon.com/services/docs/security.html**, and under
+**Creating and revoking access tokens**, use
+`POST /AuthenticationService1.svc/CreateAccessToken2` (you can omit the
+`lifetime` field for a token with no expiry). If this sounds unfamiliar,
+just use Option A instead — ask a technical teammate for help if you'd
+rather not store your password.
+
+### Step 7 — Configure `.env`
+
+This file holds your Replicon credentials and never leaves your computer.
+
+1. In the project folder, find `.env.example` and make a copy of it named
+   exactly `.env` (no other text before or after the dot).
+   - **Windows:** copy-paste the file, rename the copy to `.env`. **Important:**
+     Windows hides file extensions by default, so if you create this file by
+     hand (e.g. via Notepad's "Save As"), it can silently save as `.env.txt`
+     instead of `.env` — Replicon will then act like the file doesn't exist.
+     Turn on "File name extensions" in File Explorer's View tab so you can
+     see and confirm the exact filename, or use the copy-and-rename approach
+     above instead of Notepad's Save As.
+   - **Mac:** in Terminal, `cp .env.example .env`.
+2. Open `.env` in a plain text editor (Notepad, TextEdit, or VS Code) and
+   fill in the values from Step 6 (either the three Option A fields, or
+   `REPLICON_BEARER_TOKEN` for Option B — leave the ones you're not using
+   blank or remove them).
+3. Leave `REPLICON_USER_URI` for last. With the rest of `.env` filled in,
+   run (inside your activated virtual environment):
+   ```
+   python find_my_user_uri.py "Your Name"
+   ```
+   This searches Replicon for your name and prints your user URI. Copy it
+   into `REPLICON_USER_URI` in `.env`.
+
+### Step 8 — Connect to Claude Desktop
+
+Claude Desktop reads its MCP server list from a config file. Open (or
+create) it:
+
+- **Windows:** press `Win + R`, type `%APPDATA%\Claude`, press Enter, and
+  open `claude_desktop_config.json` in a text editor (create the file if
+  it doesn't exist).
+- **Mac:** the file is at
+  `~/Library/Application Support/Claude/claude_desktop_config.json`.
+
+Add a `replicon` entry, pointing `command` at the **full path to the
+python.exe/python3 inside the virtual environment you just created** — not
+just `python` or `python3` — so Claude Desktop always uses the exact
+environment where you installed the dependencies:
+
 ```json
 {
   "mcpServers": {
     "replicon": {
-      "command": "python3",
-      "args": ["/full/path/to/replicon-mcp/server.py"]
+      "command": "C:/Users/YourName/Documents/replicon-mcp/venv/Scripts/python.exe",
+      "args": ["C:/Users/YourName/Documents/replicon-mcp/server.py"]
     }
   }
 }
 ```
 
-**AnythingLLM** — connect via SSE transport (see AnythingLLM's MCP setup
-docs for the exact connection string format).
+(On Mac, `command` would be
+`/Users/YourName/replicon-mcp/venv/bin/python3` instead.)
+
+Use forward slashes (`/`) in the paths even on Windows, as shown above —
+this avoids having to escape backslashes in JSON. Replace `YourName` and
+the folder path with your own from Step 2/4.
+
+**AnythingLLM** — connect via SSE transport instead (see AnythingLLM's MCP
+setup docs for the exact connection string format).
+
+### Step 9 — Restart and verify
+
+Fully quit and reopen Claude Desktop (not just close the window). Start a
+new conversation and check that Replicon tools are available (Claude
+Desktop typically shows a tool/plugin icon or count once an MCP server
+connects successfully). Try asking it to show your timesheet for this
+week. If nothing happens or you see an error, check
+[Troubleshooting](#troubleshooting) below.
 
 ## AI Agent Prompt
 
@@ -154,6 +308,13 @@ Then call create_task. It returns the new task's uri — add it to the mapping
 file and use it when staging time entries. To create a sub-task, pass the
 parent task's URI as parent_task_uri.
 
+## Submitting Timesheets
+submit_timesheet writes directly to Replicon and is irreversible without a
+reopen. Always show the user their staged/committed entries for the week via
+get_my_timesheet and get explicit confirmation before calling submit_timesheet.
+It handles submitting individual time entries automatically before submitting
+the timesheet itself — no separate step needed.
+
 ## Approval Workflow (Manager)
 1. Call get_pending_approvals to list pending items.
 2. For each, retrieve and display the full timesheet with human-readable
@@ -184,6 +345,58 @@ plain numbers.
 - If you use this from multiple apps (e.g. both Claude Desktop and
   AnythingLLM), each gets its own separate draft store — drafts staged in
   one won't appear in the other until pushed to Replicon.
+
+## Troubleshooting
+
+**`'python' is not recognized as an internal or external command`**
+Python wasn't added to your PATH during install. Reinstall Python from
+python.org and make sure to check "Add python.exe to PATH" on the first
+installer screen, or use the full path to `python.exe` instead of just
+`python` everywhere in these instructions.
+
+**`'pip' is not recognized as an internal or external command`**
+Same PATH issue as above. As a workaround, replace `pip install ...` with
+`python -m pip install ...`.
+
+**`ModuleNotFoundError: No module named 'requests'`** (or `dotenv`, or `mcp`)
+This means Claude Desktop is launching a *different* Python than the one
+you ran `pip install` in — almost always because the config in Step 8
+points at a bare `python`/`python3` instead of the virtual environment's own
+interpreter. Double-check the `"command"` path in your Claude Desktop config
+matches exactly `.../replicon-mcp/venv/Scripts/python.exe` (Windows) or
+`.../replicon-mcp/venv/bin/python3` (Mac).
+
+**`SyntaxError` pointing at something like `dict | None`**
+Your Python is older than 3.10. Run `python --version` to check, and
+install a newer Python (Step 3).
+
+**PowerShell: "...cannot be loaded because running scripts is disabled on
+this system"** (when activating the virtual environment)
+Run this once in that PowerShell window, then try activating again:
+```
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+**Errors like "REPLICON_BASE_URL is not set in .env"**
+Your `.env` file is missing, misnamed (check it's not `.env.txt` — see Step
+7), or not in the same folder as `server.py`.
+
+**Claude Desktop doesn't show any Replicon tools at all**
+Usually a typo in the JSON config (a missing comma, or an unescaped
+backslash in a Windows path — use forward slashes instead, as shown in
+Step 8), or the config file is in the wrong location. Check the file is
+valid JSON, and that you fully quit and reopened Claude Desktop after
+editing it.
+
+**401 / 403 errors when Claude tries to use a Replicon tool**
+Your bearer token expired or was mistyped, or (for Basic Auth) your company
+key, username, or password is wrong. Re-check the values in `.env` against
+Step 6.
+
+**Antivirus or company security software blocks `python.exe` from running**
+Some corporate IT policies block scripts/executables run from a virtual
+environment folder. Contact your IT department to allowlist the project
+folder if this happens.
 
 ## Status
 

@@ -66,8 +66,8 @@ def get_user_uri() -> str:
     Required for tools that operate on 'my' timesheet or filter pending
     approvals by the current approver.
 
-    To find your URI: call TimeEntryService3/GetTimeEntriesForUserAndDateRange
-    for any week — your user URI appears in the 'user.uri' field of each entry.
+    To find your URI: run `python find_my_user_uri.py "Your Name"` (only needs
+    REPLICON_BASE_URL and your auth already set in .env — see README.md).
     Format: urn:replicon-tenant:{tenant_id}:user:{id}
     """
     uri = os.getenv("REPLICON_USER_URI", "").strip()
