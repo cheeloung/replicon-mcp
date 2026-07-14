@@ -17,6 +17,7 @@ Tools exposed:
     remove_staged_entry       — delete a staged draft
 
   Replicon writes (irreversible — always confirm with user first)
+    create_task               — create a task under a project (direct write)
     push_drafts               — push all staged drafts to Replicon
     submit_timesheet          — submit my timesheet for approval
     approve_timesheet         — approve a team member's timesheet (manager)
@@ -189,6 +190,65 @@ def list_tasks_for_project(project_uri: str, page: int = 1, page_size: int = 50)
         page_size=page_size,
     )
     return _pretty(response_shapes.shape_task_list(raw))
+
+
+@mcp.tool()
+def create_task(
+    project_uri: str,
+    name: str,
+    parent_task_uri: str = "",
+    code: str = "",
+    description: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    estimated_hours: float = 0,
+    allow_time_entry: bool = True,
+) -> str:
+    """
+    Create a new task under an existing project in Replicon.
+
+    This writes directly to Replicon (there is no staging step for tasks). Always
+    resolve the project URI with list_projects first, and confirm the task name
+    and target project with the user before calling — creating a task is a real,
+    visible change to the project structure.
+
+    Args:
+        project_uri:      Full Replicon project URI the task belongs to (required).
+        name:             Task name (required).
+        parent_task_uri:  Optional parent task URI, to create a sub-task. Omit or
+                          pass "" to create a top-level task under the project.
+        code:             Optional task code.
+        description:      Optional task description.
+        start_date:       Optional time-entry start date ("YYYY-MM-DD").
+        end_date:         Optional time-entry end date ("YYYY-MM-DD").
+        estimated_hours:  Optional estimated effort in decimal hours (e.g. 7.5 for
+                          7h 30m). Omit or pass 0 to leave the estimate unset.
+        allow_time_entry: Whether time can be logged against the task (default True).
+
+    On success returns the new task:
+        { "uri": "...:task:NNN", "name": "...", "code": "...", "display_text": "..." }
+    Use the returned uri when staging time entries. You can call
+    list_tasks_for_project again to confirm the task now appears.
+
+    Returns a structured { "error": ... } if Replicon rejects the request (e.g.
+    the project URI is not found).
+    """
+    try:
+        raw = _client.create_task(
+            project_uri=project_uri,
+            name=name,
+            parent_task_uri=parent_task_uri or None,
+            code=code,
+            description=description,
+            start_date=_date_dict(start_date) if start_date else None,
+            end_date=_date_dict(end_date) if end_date else None,
+            estimated_hours=estimated_hours if estimated_hours else None,
+            allow_time_entry=allow_time_entry,
+        )
+    except RepliconAPIError as e:
+        return _pretty({"error": str(e)})
+
+    return _pretty(response_shapes.shape_created_task(raw))
 
 
 # ---------------------------------------------------------------------------

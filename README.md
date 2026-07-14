@@ -145,6 +145,15 @@ Workflow:
 If the user edits a staged entry, call edit_staged_entry and re-display the
 full updated draft before asking again.
 
+## Creating Tasks
+create_task writes directly to Replicon — there is no draft/staging step for
+tasks. Before calling it:
+1. Resolve the target project URI with list_projects (or the mapping file).
+2. Confirm the task name and target project with the user.
+Then call create_task. It returns the new task's uri — add it to the mapping
+file and use it when staging time entries. To create a sub-task, pass the
+parent task's URI as parent_task_uri.
+
 ## Approval Workflow (Manager)
 1. Call get_pending_approvals to list pending items.
 2. For each, retrieve and display the full timesheet with human-readable
@@ -180,5 +189,7 @@ plain numbers.
 
 - ✅ Read timesheet, list projects/tasks, stage/edit/remove draft entries,
   push drafts to Replicon — verified working.
+- ✅ Create a task under a project (create_task) — verified end-to-end against
+  a live create/read/delete round-trip (uses the TaskService1 task-draft flow).
 - ⏳ Submit for approval / approve timesheets — built, not yet verified
   against a real write. Treat with extra caution until confirmed.

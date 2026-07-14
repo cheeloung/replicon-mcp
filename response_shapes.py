@@ -227,6 +227,27 @@ def shape_task_list(raw_response: dict) -> list[dict]:
     return result
 
 
+def shape_created_task(raw_response: dict) -> dict:
+    """
+    Shape the raw TaskService1/CreateTaskOrApplyModifications response into a
+    clean dict.
+
+    The operation returns a TaskReference1 for the new task (unwrapped from "d"
+    by RepliconClient._post). Confirmed shape:
+      { "uri": "...:task:NNN", "name": "...", "code": "...", "displayText": "..." }
+
+    Output:
+        { "uri": "...:task:NNN", "name": "...", "code": "...", "display_text": "..." }
+    """
+    ref = raw_response if isinstance(raw_response, dict) else {}
+    return {
+        "uri": ref.get("uri"),
+        "name": ref.get("name"),
+        "code": ref.get("code"),
+        "display_text": ref.get("displayText"),
+    }
+
+
 def shape_user_list(raw_response: dict) -> list[dict]:
     """
     Shape raw UserListService1/GetData response into a clean list.

@@ -105,6 +105,84 @@ class RepliconClient:
         }
         return self._post("TaskListService1", "GetHierarchyDataForProject", payload)
 
+    def create_task(self, project_uri: str, name: str, parent_task_uri: str | None = None,
+                     code: str = "", description: str = "",
+                     start_date: dict | None = None, end_date: dict | None = None,
+                     estimated_hours: float | None = None,
+                     allow_time_entry: bool = True) -> dict:
+        """
+        Create a task under a project (optionally under a parent task).
+
+        Uses TaskService1.svc via the task-draft flow, which is Replicon's
+        documented and reliable path for building a new task:
+
+          1. CreateNewDraft(parentUri)  — create a draft as a child of the given
+             task OR project (the parent is parent_task_uri for a sub-task, else
+             the project itself). Returns the draft's URI.
+          2. Update* — set the draft's fields with the granular operations
+             (UpdateName / UpdateCode / UpdateDescription /
+             UpdateTimeEntryDateRange / UpdateEstimatedHours /
+             UpdateAllowTimeEntry).
+          3. PublishDraft(draftUri) — materialise the draft into a persisted task.
+             Returns a TaskReference1 for the new task.
+
+        Verified end-to-end against the live tenant with a create/read/delete
+        round-trip. (The atomic CreateTaskOrApplyModifications operation exists
+        too, but its request schema is not auto-generated and it proved brittle
+        for top-level task creation — the draft flow is used instead.)
+
+        Each request body is keyed by the operation's parameter names, per the
+        WCF/JSON convention used throughout this client (e.g. {"taskUri": ...}).
+
+        start_date / end_date: optional Replicon date dicts {"year","month","day"}
+        setting the task's time-entry date range.
+
+        estimated_hours: optional estimated effort as decimal hours (e.g. 7.5 for
+        7h 30m). Converted to a TaskDuration1 {"hours","minutes","seconds"} the
+        same way time-entry durations are (see put_time_entry).
+
+        Returns the raw TaskReference1 payload: {"uri", "name", "code",
+        "displayText", ...} for the newly created task.
+        """
+        # Parent is the parent task for a sub-task, otherwise the project itself
+        # (projects are the root of their own task hierarchy).
+        parent_uri = parent_task_uri or project_uri
+        draft = self._post("TaskService1", "CreateNewDraft", {"parentUri": parent_uri})
+        draft_uri = draft.get("uri") if isinstance(draft, dict) else draft
+        if not draft_uri:
+            raise RepliconAPIError(f"CreateNewDraft returned no draft URI: {draft!r}")
+
+        try:
+            self._post("TaskService1", "UpdateName", {"taskUri": draft_uri, "name": name})
+            if code:
+                self._post("TaskService1", "UpdateCode",
+                           {"taskUri": draft_uri, "code": code})
+            if description:
+                self._post("TaskService1", "UpdateDescription",
+                           {"taskUri": draft_uri, "description": description})
+            if start_date or end_date:
+                self._post("TaskService1", "UpdateTimeEntryDateRange", {
+                    "taskUri": draft_uri,
+                    "dateRange": {"startDate": start_date, "endDate": end_date},
+                })
+            if estimated_hours is not None:
+                whole_hours = int(estimated_hours)
+                minutes = round((estimated_hours - whole_hours) * 60)
+                self._post("TaskService1", "UpdateEstimatedHours", {
+                    "taskUri": draft_uri,
+                    "estimatedHours": {"hours": whole_hours, "minutes": minutes, "seconds": 0},
+                })
+            self._post("TaskService1", "UpdateAllowTimeEntry",
+                       {"taskUri": draft_uri, "allowTimeEntry": allow_time_entry})
+            return self._post("TaskService1", "PublishDraft", {"draftUri": draft_uri})
+        except Exception:
+            # Best-effort cleanup so a failed create doesn't leave an orphan draft.
+            try:
+                self._post("TaskService1", "Delete", {"taskUri": draft_uri})
+            except Exception:
+                pass
+            raise
+
     # ------------------------------------------------------------------
     # Timesheet read
     # ------------------------------------------------------------------
