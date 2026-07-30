@@ -5,8 +5,10 @@ their Entra identity can use their own Replicon credentials.
 Bearer token, not username/password: Basic Auth fails outright (401) for any
 Replicon account with 2-step verification enabled — confirmed live against
 this tenant. A personal API token generated per
-https://sb1.replicon.com/services/docs/security.html sidesteps MFA entirely,
-so the /link form collects that instead and guides the user to that page.
+https://eu1.replicon.com/services/docs/security.html (the tenant's own
+domain — the generic sb1.replicon.com sandbox docs page does NOT work for
+generating a token here) sidesteps MFA entirely, so the /link form walks
+the user through generating one via that page's Swagger UI.
 
 Unlike tuleap-mcp's onboarding (a single URL + API key form), Replicon has no
 "who am I" endpoint — the same gap find_my_user_uri.py works around locally
@@ -67,31 +69,67 @@ def _redirect_uri() -> str:
     return f"{public_url}/link/callback"
 
 
+_PAGE_STYLE = """
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+         max-width: 30rem; margin: 3rem auto; padding: 0 1rem; color: #222; }
+  .card { background: #fff; border: 1px solid #e0e0e0; border-radius: 12px; padding: 1.5rem 1.75rem; }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  .lede { font-size: 14px; color: #555; line-height: 1.6; margin: 0 0 20px; }
+  .warn { background: #fff8e1; border-radius: 6px; padding: 10px 12px; margin: 0 0 20px; }
+  .warn p { font-size: 13px; color: #8a6d00; margin: 0; line-height: 1.5; }
+  .error { background: #fdecea; border-radius: 6px; padding: 10px 14px; margin: 0 0 20px; }
+  .error p { color: #b00020; font-size: 14px; margin: 0; }
+  ol { margin: 0 0 24px; padding-left: 20px; }
+  li { font-size: 14px; line-height: 1.6; margin-bottom: 12px; }
+  li:last-child { margin-bottom: 0; }
+  code { font-family: monospace; background: #f4f4f4; padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  form { border-top: 1px solid #eee; padding-top: 20px; }
+  label { display: block; font-size: 13px; color: #555; margin-bottom: 6px; }
+  input[type=text], input[type=password] { width: 100%; box-sizing: border-box; padding: 8px 10px;
+         border: 1px solid #ccc; border-radius: 6px; font-size: 14px; margin-bottom: 14px; }
+  button { width: 100%; padding: 10px; border: none; border-radius: 6px; background: #1a1a1a;
+           color: #fff; font-size: 14px; font-weight: 500; cursor: pointer; }
+  .radio-row { font-size: 14px; margin-bottom: 10px; }
+</style>
+"""
+
+
+def _page(body: str) -> str:
+    return f'<html><head>{_PAGE_STYLE}</head><body><div class="card">{body}</div></body></html>'
+
+
+def _error_page(message: str) -> str:
+    return _page(f'<h1>Something went wrong</h1><p class="lede">{html.escape(message)}</p>')
+
+
 def _credentials_form(link_code: str, error: str = "") -> str:
-    error_html = f'<p style="color:#b00">{html.escape(error)}</p>' if error else ""
-    return f"""
-        <html><body style="font-family: sans-serif; max-width: 32rem; margin: 3rem auto;">
-        <h2>Link your Replicon account</h2>
-        <p>Signed in. You'll need a personal Replicon API token (your normal
-        password won't work here if you have 2-step verification enabled —
-        most accounts do). Generate one by following
-        <a href="https://sb1.replicon.com/services/docs/security.html" target="_blank"
-           rel="noopener">Replicon's API token guide</a>, then paste it below along
-        with your name as it appears in Replicon (used to find your account —
-        Replicon has no direct "who am I" lookup). The token is stored encrypted
-        and only used for MCP calls made under your identity.</p>
+    error_html = f'<div class="error"><p>{html.escape(error)}</p></div>' if error else ""
+    return _page(f"""
+        <h1>Link your Replicon account</h1>
+        <p class="lede">Generate a personal access token from Replicon, then paste it in below.</p>
         {error_html}
+        <div class="warn"><p>Use the <code>eu1</code> domain in the steps below, not <code>sb1</code>.</p></div>
+        <ol>
+            <li>Open a new tab and make sure you're logged into
+                <a href="https://eu1.replicon.com" target="_blank" rel="noopener">eu1.replicon.com</a>.</li>
+            <li>In another tab, open Replicon's
+                <a href="https://eu1.replicon.com/services/docs/security.html" target="_blank" rel="noopener">Security API page</a>.</li>
+            <li>Scroll to <strong>Creating and revoking access tokens</strong> and expand <code>/CreateAccessToken2</code>.</li>
+            <li>Click <strong>Try it out</strong>.</li>
+            <li>Fill in <code>loginName</code> with your email. <code>description</code> and <code>unitOfWorkId</code> are optional.</li>
+            <li>Click <strong>Execute</strong>.</li>
+            <li>Scroll to the <strong>Response body</strong> and copy the <code>token</code> value.</li>
+        </ol>
         <form method="post" action="/link/search">
             <input type="hidden" name="link_code" value="{html.escape(link_code)}">
-            <p><label>Replicon API token<br>
-                <input name="bearer_token" type="password" required style="width:100%"></label></p>
-            <p><label>Your name as it appears in Replicon<br>
-                <input name="display_name" type="text" required style="width:100%"
-                       placeholder="e.g. Cheah, Chee Loung"></label></p>
+            <label>Replicon API token</label>
+            <input name="bearer_token" type="password" required placeholder="Paste the token value here">
+            <label>Your name in Replicon</label>
+            <input name="display_name" type="text" required placeholder="e.g. Cheah, Chee Loung">
             <button type="submit">Find my account</button>
         </form>
-        </body></html>
-    """
+    """)
 
 
 async def _link_start(request: Request):
@@ -107,7 +145,7 @@ async def _link_callback(request: Request):
     flow = _pending_flows.pop(state, None) if state else None
     if flow is None:
         return HTMLResponse(
-            "Login session expired or invalid — go back and try /link again.",
+            _error_page("Login session expired or invalid — go back and try /link again."),
             status_code=400,
         )
 
@@ -116,14 +154,14 @@ async def _link_callback(request: Request):
     )
     if "error" in result:
         return HTMLResponse(
-            f"Login failed: {result.get('error_description', result['error'])}",
+            _error_page(f"Login failed: {result.get('error_description', result['error'])}"),
             status_code=400,
         )
 
     subject = result.get("id_token_claims", {}).get("oid")
     if not subject:
         return HTMLResponse(
-            "Login succeeded but no user id was returned.", status_code=400
+            _error_page("Login succeeded but no user id was returned."), status_code=400
         )
 
     link_code = credentials.create_link_session(subject)
@@ -138,7 +176,7 @@ async def _link_search(request: Request):
 
     if credentials.peek_link_session(link_code) is None:
         return HTMLResponse(
-            "This link session expired — go back and try /link again.", status_code=400
+            _error_page("This link session expired — go back and try /link again."), status_code=400
         )
     if not bearer_token or not display_name:
         return HTMLResponse(_credentials_form(link_code, "All fields are required."))
@@ -160,21 +198,19 @@ async def _link_search(request: Request):
     _pending_credentials[link_code] = {"bearer_token": bearer_token}
 
     options = "\n".join(
-        f'<p><label><input type="radio" name="user_uri" value="{html.escape(m["uri"])}" '
-        f'{"checked" if i == 0 else ""}> {html.escape(m["name"])}</label></p>'
+        f'<div class="radio-row"><label><input type="radio" name="user_uri" value="{html.escape(m["uri"])}" '
+        f'{"checked" if i == 0 else ""}> {html.escape(m["name"])}</label></div>'
         for i, m in enumerate(matches)
     )
-    return HTMLResponse(f"""
-        <html><body style="font-family: sans-serif; max-width: 32rem; margin: 3rem auto;">
-        <h2>Confirm your Replicon account</h2>
-        <p>Found {len(matches)} match(es) for '{html.escape(display_name)}' — pick yours:</p>
+    return HTMLResponse(_page(f"""
+        <h1>Confirm your Replicon account</h1>
+        <p class="lede">Found {len(matches)} match(es) for '{html.escape(display_name)}' — pick yours:</p>
         <form method="post" action="/link/submit">
             <input type="hidden" name="link_code" value="{html.escape(link_code)}">
             {options}
             <button type="submit">Link account</button>
         </form>
-        </body></html>
-    """)
+    """))
 
 
 async def _link_submit(request: Request):
@@ -186,19 +222,18 @@ async def _link_submit(request: Request):
     subject = credentials.consume_link_session(link_code) if link_code else None
     if subject is None or pending is None:
         return HTMLResponse(
-            "This link session expired — go back and try /link again.", status_code=400
+            _error_page("This link session expired — go back and try /link again."), status_code=400
         )
     if not user_uri:
-        return HTMLResponse("No account selected.", status_code=400)
+        return HTMLResponse(_error_page("No account selected."), status_code=400)
 
     credentials.set_replicon_credentials(
         subject, pending["bearer_token"], user_uri
     )
-    return HTMLResponse(
-        "<html><body style='font-family: sans-serif; max-width: 32rem; margin: 3rem auto;'>"
-        "<h2>Linked</h2><p>Your Replicon account is linked. You can close this tab and use "
-        "the replicon-mcp connector in Claude.</p></body></html>"
-    )
+    return HTMLResponse(_page(
+        '<h1>Linked</h1><p class="lede">Your Replicon account is linked. '
+        "You can close this tab and use the replicon-mcp connector in Claude.</p>"
+    ))
 
 
 def register(mcp) -> None:
