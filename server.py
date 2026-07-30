@@ -17,6 +17,7 @@ Tools exposed:
     remove_staged_entry       — delete a staged draft
 
   Replicon writes (irreversible — always confirm with user first)
+    create_task               — create a task under a project (direct write)
     push_drafts               — push all staged drafts to Replicon
     submit_timesheet          — submit my timesheet for approval
     approve_timesheet         — approve a team member's timesheet (manager)
@@ -29,9 +30,12 @@ Deliberately NOT exposed: raw put_time_entry (use stage → push instead).
 """
 
 import json
+import os
 from datetime import date, timedelta
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.settings import AuthSettings
 
 import config
 import draft_store
@@ -44,24 +48,110 @@ from replicon_client import (
     TIMESHEET_STATUS_OPEN,
 )
 
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
+TRANSPORT = os.getenv("TRANSPORT", "stdio")
 
-config.validate()
-_client = RepliconClient()
-_my_uri = config.get_user_uri()
-
-mcp = FastMCP(
-    "Replicon Timesheet",
-    instructions=(
-        "You help users manage their Replicon timesheets. "
-        "Always stage entries first and show the user a summary before pushing. "
-        "For approvals, show the team member's entries and ask for explicit confirmation. "
-        "Cache resolved URI→name mappings (projects, tasks, users) in conversation memory "
-        "to avoid redundant lookups within the same session."
-    ),
+_INSTRUCTIONS = (
+    "You help users manage their Replicon timesheets. "
+    "Always stage entries first and show the user a summary before pushing. "
+    "For approvals, show the team member's entries and ask for explicit confirmation. "
+    "Cache resolved URI→name mappings (projects, tasks, users) in conversation memory "
+    "to avoid redundant lookups within the same session."
 )
+
+
+class CredentialsMissingError(Exception):
+    """Raised inside a tool call — never sys.exit(), which would kill the
+    shared server process for every connected user, not just this request."""
+
+
+def _resolve_caller() -> tuple[RepliconClient, str]:
+    """
+    Returns (client, user_uri) for the caller of the current tool invocation.
+
+    stdio mode: unchanged, single shared credential from .env, resolved once.
+    streamable-http mode: each request is authenticated as a specific Entra
+    user (see oauth_provider.py); look up *their* linked Replicon credentials.
+    """
+    if TRANSPORT == "stdio":
+        config.validate()
+        return RepliconClient(), config.get_user_uri()
+
+    access_token = get_access_token()
+    creds = credentials.get_replicon_credentials(access_token.subject)
+    if creds is None:
+        public_url = os.environ.get("PUBLIC_URL", "")
+        raise CredentialsMissingError(
+            f"No Replicon account linked yet for this user. Visit {public_url}/link to link one."
+        )
+    bearer_token, user_uri = creds
+    return RepliconClient(config.get_base_url(), bearer_token=bearer_token), user_uri
+
+
+# Set in _build_mcp() when TRANSPORT != stdio — referenced by the
+# /oauth/entra/callback route registered below.
+_oauth_provider = None
+
+
+def _build_mcp() -> FastMCP:
+    global _oauth_provider
+
+    if TRANSPORT == "stdio":
+        config.validate()
+        return FastMCP("Replicon Timesheet", instructions=_INSTRUCTIONS)
+
+    from oauth_provider import provider_from_env
+
+    public_url = os.environ["PUBLIC_URL"].rstrip("/")
+    _oauth_provider = provider_from_env()
+    return FastMCP(
+        "Replicon Timesheet",
+        instructions=_INSTRUCTIONS,
+        # We act as the full OAuth Authorization Server here (not just a
+        # resource server delegating to Entra) because claude.ai's connector
+        # implementation expects /authorize and /token on this same domain —
+        # see oauth_provider.py for why and how it proxies Entra underneath.
+        auth_server_provider=_oauth_provider,
+        auth=AuthSettings(
+            issuer_url=public_url,
+            resource_server_url=public_url,
+        ),
+        # claude.ai's connector treats whatever bare URL you type into "Add
+        # custom connector" as both the resource identifier AND the actual
+        # MCP protocol endpoint — it doesn't append a path of its own. Move
+        # the endpoint to root (FastMCP defaults to /mcp) to match, or every
+        # connector attempt 404s trying to speak MCP at the bare domain.
+        streamable_http_path="/",
+        # Binds all interfaces intentionally: runs inside a container behind a
+        # reverse proxy that terminates TLS (see docs/), never exposed directly.
+        host="0.0.0.0",  # nosec B104
+        port=int(os.getenv("PORT", "8001")),
+    )
+
+
+mcp = _build_mcp()
+
+if TRANSPORT != "stdio":
+    import credentials
+    from starlette.requests import Request
+    from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+
+    import onboarding
+
+    onboarding.register(mcp)
+
+    @mcp.custom_route("/health", methods=["GET"])
+    async def health_check(request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
+    @mcp.custom_route("/oauth/entra/callback", methods=["GET"])
+    async def oauth_entra_callback(request: Request):
+        redirect_url = _oauth_provider.complete_entra_login(dict(request.query_params))
+        if redirect_url is None:
+            return HTMLResponse(
+                "Login session expired or invalid — go back and try connecting again.",
+                status_code=400,
+            )
+        return RedirectResponse(redirect_url)
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +190,7 @@ def _pretty(obj) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_my_timesheet(week_date: str) -> str:
+def get_my_timesheet(week_date: str, include_project_budget: bool = True) -> str:
     """
     Read your timesheet for the week containing the given date.
 
@@ -110,6 +200,10 @@ def get_my_timesheet(week_date: str) -> str:
     Args:
         week_date: Any date in the target week, as "YYYY-MM-DD".
                    The server computes the Monday–Sunday range automatically.
+        include_project_budget: When True (default), also fetch a "used vs
+                   total" hours budget summary for each distinct project on
+                   the timesheet (2 extra read-only API calls per distinct
+                   project). Set False to skip and speed up the call.
 
     Returns JSON with:
         timesheet_status  — current status URI (open / waiting / etc.)
@@ -119,7 +213,12 @@ def get_my_timesheet(week_date: str) -> str:
         drafts            — local staged entries not yet pushed
         week_start        — computed Monday of the week
         week_end          — computed Sunday of the week
+        project_budgets   — (when include_project_budget) {project_uri: {
+                            estimation_mode, budgeted_hours, actual_hours,
+                            hours_remaining, percent_used}, ...} — actual_hours
+                            is the project's all-time total, not just this week
     """
+    _client, _my_uri = _resolve_caller()
     week_start, week_end = _week_bounds(week_date)
 
     view = timesheet_workflow.get_timesheet_view(
@@ -128,7 +227,7 @@ def get_my_timesheet(week_date: str) -> str:
 
     shaped_rows = response_shapes.shape_time_entries(view["committed"])
 
-    return _pretty({
+    result = {
         "week_start": week_start,
         "week_end": week_end,
         "timesheet_status": view["timesheet_status"],
@@ -138,7 +237,12 @@ def get_my_timesheet(week_date: str) -> str:
             sum(r["total_hours"] for r in shaped_rows), 4
         ),
         "drafts": view["drafts"],
-    })
+    }
+    if include_project_budget:
+        result["project_budgets"] = timesheet_workflow.get_project_budgets_for_rows(
+            _client, shaped_rows
+        )
+    return _pretty(result)
 
 
 @mcp.tool()
@@ -158,6 +262,7 @@ def list_projects(text_search: str = "", page: int = 1, page_size: int = 50) -> 
         [ { "uri": "urn:replicon-tenant:...:project:70", "name": "KWA General" }, ... ]
     Cache uri→name in conversation memory to avoid re-fetching within the session.
     """
+    _client, _ = _resolve_caller()
     raw = _client.get_projects(
         page=page,
         page_size=page_size,
@@ -183,12 +288,73 @@ def list_tasks_for_project(project_uri: str, page: int = 1, page_size: int = 50)
         [ { "uri": "urn:replicon-tenant:...:task:267", "name": "other tasks" }, ... ]
     Cache uri→name in conversation memory to avoid re-fetching within the session.
     """
+    _client, _ = _resolve_caller()
     raw = _client.get_tasks_for_project(
         project_uri=project_uri,
         page=page,
         page_size=page_size,
     )
     return _pretty(response_shapes.shape_task_list(raw))
+
+
+@mcp.tool()
+def create_task(
+    project_uri: str,
+    name: str,
+    parent_task_uri: str = "",
+    code: str = "",
+    description: str = "",
+    start_date: str = "",
+    end_date: str = "",
+    estimated_hours: float = 0,
+    allow_time_entry: bool = True,
+) -> str:
+    """
+    Create a new task under an existing project in Replicon.
+
+    This writes directly to Replicon (there is no staging step for tasks). Always
+    resolve the project URI with list_projects first, and confirm the task name
+    and target project with the user before calling — creating a task is a real,
+    visible change to the project structure.
+
+    Args:
+        project_uri:      Full Replicon project URI the task belongs to (required).
+        name:             Task name (required).
+        parent_task_uri:  Optional parent task URI, to create a sub-task. Omit or
+                          pass "" to create a top-level task under the project.
+        code:             Optional task code.
+        description:      Optional task description.
+        start_date:       Optional time-entry start date ("YYYY-MM-DD").
+        end_date:         Optional time-entry end date ("YYYY-MM-DD").
+        estimated_hours:  Optional estimated effort in decimal hours (e.g. 7.5 for
+                          7h 30m). Omit or pass 0 to leave the estimate unset.
+        allow_time_entry: Whether time can be logged against the task (default True).
+
+    On success returns the new task:
+        { "uri": "...:task:NNN", "name": "...", "code": "...", "display_text": "..." }
+    Use the returned uri when staging time entries. You can call
+    list_tasks_for_project again to confirm the task now appears.
+
+    Returns a structured { "error": ... } if Replicon rejects the request (e.g.
+    the project URI is not found).
+    """
+    _client, _ = _resolve_caller()
+    try:
+        raw = _client.create_task(
+            project_uri=project_uri,
+            name=name,
+            parent_task_uri=parent_task_uri or None,
+            code=code,
+            description=description,
+            start_date=_date_dict(start_date) if start_date else None,
+            end_date=_date_dict(end_date) if end_date else None,
+            estimated_hours=estimated_hours if estimated_hours else None,
+            allow_time_entry=allow_time_entry,
+        )
+    except RepliconAPIError as e:
+        return _pretty({"error": str(e)})
+
+    return _pretty(response_shapes.shape_created_task(raw))
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +394,7 @@ def stage_time_entry(
 
     Returns the created draft record including its draft_id (needed for edits/removes).
     """
+    _, _my_uri = _resolve_caller()
     week_start, week_end = _week_bounds(week_date)
     entry_date_dict = _date_dict(entry_date)
 
@@ -274,6 +441,7 @@ def edit_staged_entry(
 
     Returns the updated draft record, or an error if the draft_id was not found.
     """
+    _, _my_uri = _resolve_caller()
     week_start, week_end = _week_bounds(week_date)
 
     changes = {}
@@ -312,6 +480,7 @@ def remove_staged_entry(week_date: str, draft_id: str) -> str:
 
     Returns confirmation or an error if not found.
     """
+    _, _my_uri = _resolve_caller()
     week_start, week_end = _week_bounds(week_date)
 
     removed = draft_store.remove_draft(_my_uri, week_start, week_end, draft_id)
@@ -344,6 +513,7 @@ def push_drafts(week_date: str) -> str:
 
     Returns push results with succeeded/failed lists.
     """
+    _client, _my_uri = _resolve_caller()
     week_start, week_end = _week_bounds(week_date)
 
     result = timesheet_workflow.push_drafts(
@@ -370,6 +540,7 @@ def delete_committed_entry(week_date: str, entry_uri: str) -> str:
 
     Returns confirmation, or a clear error if the timesheet is not open.
     """
+    _client, _my_uri = _resolve_caller()
     week_start, _ = _week_bounds(week_date)
 
     details = _client.get_timesheet_for_date(_my_uri, week_start)
@@ -407,6 +578,7 @@ def delete_committed_row(week_date: str, entry_uris: list[str]) -> str:
 
     Returns count of deleted entries plus any failures.
     """
+    _client, _my_uri = _resolve_caller()
     week_start, _ = _week_bounds(week_date)
 
     details = _client.get_timesheet_for_date(_my_uri, week_start)
@@ -441,36 +613,36 @@ def submit_timesheet(week_date: str, comments: str = "") -> str:
     """
     Submit your timesheet for the given week for approval.
 
+    Replicon requires every underlying time entry to be individually
+    submitted before the timesheet itself can be submitted. This tool does
+    that automatically — submitting each time entry revision group for the
+    week, then the timesheet itself — mirroring the "Submit X time entry(s)"
+    + "Submit timesheet" flow in the Replicon web UI. Nothing else needs to
+    be called first.
+
     The timesheet must be in 'open' status — if it's already submitted or
-    in another state, this will return an error. Fetch fresh status via
+    in another state, this returns an error. Fetch fresh status via
     get_my_timesheet immediately before calling this to confirm.
 
-    CAUTION: This is a real write to Replicon. Confirm with the user first.
+    CAUTION: Real writes to Replicon (one per time entry revision group,
+    then the timesheet). Confirm with the user first.
 
     Args:
         week_date: Any date in the target week ("YYYY-MM-DD").
-        comments:  Optional submission comments.
+        comments:  Optional submission comments (applied to both the
+                   entry-level and timesheet-level submits).
 
-    Returns the API response on success, or a clear error message.
+    Returns which revision groups were submitted/failed plus the
+    timesheet-level API response, or a clear error message.
     """
-    week_start, _ = _week_bounds(week_date)
-
-    # Fetch fresh timesheet details to get current status and URI
-    details = _client.get_timesheet_for_date(_my_uri, week_start)
-    timesheet = details.get("timesheet", {})
-    timesheet_uri = timesheet.get("uri")
-    current_status = timesheet.get("statusUri")
-
-    if not timesheet_uri:
-        return _pretty({"error": "Could not retrieve timesheet URI. Does a timesheet exist for this week?"})
+    _client, _my_uri = _resolve_caller()
+    week_start, week_end = _week_bounds(week_date)
 
     try:
-        result = _client.submit_timesheet(
-            timesheet_uri=timesheet_uri,
-            current_status_uri=current_status,
-            comments=comments,
+        result = timesheet_workflow.submit_timesheet(
+            _client, _my_uri, week_start, week_end, comments=comments
         )
-        return _pretty({"submitted": True, "response": result})
+        return _pretty({"submitted": True, **result})
     except (TimesheetStateError, RepliconAPIError) as e:
         return _pretty({"error": str(e)})
 
@@ -496,6 +668,7 @@ def find_users(name_search: str, page: int = 1, page_size: int = 25) -> str:
     Returns shaped list:
         [ { "uri": "urn:replicon-tenant:...:user:105", "name": "Lim, Seay Ee" }, ... ]
     """
+    _client, _ = _resolve_caller()
     raw = _client.find_users(name_search=name_search, page=page, page_size=page_size)
     return _pretty(response_shapes.shape_user_list(raw))
 
@@ -520,6 +693,7 @@ def reopen_timesheet(week_date: str, comments: str = "") -> str:
 
     Returns confirmation on success, or a clear error if status has changed.
     """
+    _client, _my_uri = _resolve_caller()
     week_start, _ = _week_bounds(week_date)
 
     details = _client.get_timesheet_for_date(_my_uri, week_start)
@@ -554,13 +728,16 @@ def get_pending_approvals() -> str:
 
     Returns a list of pending approval items. Empty list = nothing pending.
     """
+    _client, _my_uri = _resolve_caller()
     raw_list = _client.get_pending_approvals_list(_my_uri)
     items = response_shapes.shape_pending_approvals_list(raw_list)
     return _pretty({"pending_count": len(items), "pending": items})
 
 
 @mcp.tool()
-def get_team_member_timesheet(user_uri: str, week_date: str) -> str:
+def get_team_member_timesheet(
+    user_uri: str, week_date: str, include_project_budget: bool = True
+) -> str:
     """
     View a team member's timesheet entries for a given week.
 
@@ -570,9 +747,18 @@ def get_team_member_timesheet(user_uri: str, week_date: str) -> str:
     Args:
         user_uri:  The team member's full Replicon user URI.
         week_date: Any date in their target week ("YYYY-MM-DD").
+        include_project_budget: When True (default), also fetch a "used vs
+                   total" hours budget summary for each distinct project on
+                   the timesheet (2 extra read-only API calls per distinct
+                   project). Set False to skip and speed up the call.
 
-    Returns shaped time entry rows + timesheet metadata.
+    Returns shaped time entry rows + timesheet metadata, plus (when
+    include_project_budget) a project_budgets dict keyed by project_uri with
+    {estimation_mode, budgeted_hours, actual_hours, hours_remaining,
+    percent_used} — actual_hours is the project's all-time total, not just
+    this week.
     """
+    _client, _ = _resolve_caller()
     week_start, week_end = _week_bounds(week_date)
 
     raw_entries = _client.get_time_entries_for_date_range(user_uri, week_start, week_end)
@@ -588,6 +774,10 @@ def get_team_member_timesheet(user_uri: str, week_date: str) -> str:
         timesheet_status=ts.get("statusUri", ""),
         raw_entries=raw_entries,
     )
+    if include_project_budget:
+        shaped["project_budgets"] = timesheet_workflow.get_project_budgets_for_rows(
+            _client, shaped["rows"]
+        )
     return _pretty(shaped)
 
 
@@ -617,6 +807,7 @@ def approve_timesheet(
 
     Returns confirmation on success, or a clear error if status has changed.
     """
+    _client, _ = _resolve_caller()
     week_start, _ = _week_bounds(week_date)
 
     # Re-fetch status fresh — do not trust a cached value
@@ -641,5 +832,9 @@ def approve_timesheet(
 # Entrypoint
 # ---------------------------------------------------------------------------
 
+def main():
+    mcp.run(transport="stdio" if TRANSPORT == "stdio" else "streamable-http")
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()

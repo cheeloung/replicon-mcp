@@ -11,7 +11,7 @@ API style notes:
 
 import uuid
 import requests
-from config import get_base_url, get_auth_headers, TULEAP_FIELD_URI
+from config import get_base_url, get_auth_headers, get_company_key, basic_auth_header, TULEAP_FIELD_URI
 
 
 class RepliconAPIError(Exception):
@@ -30,12 +30,33 @@ TIMESHEET_STATUS_WAITING = "urn:replicon:timesheet-status:waiting"  # submitted,
 
 
 class RepliconClient:
-    def __init__(self):
-        self.base_url = get_base_url()
-        self.headers = {
-            "Content-Type": "application/json",
-            **get_auth_headers(),
-        }
+    def __init__(self, base_url: str | None = None, bearer_token: str | None = None,
+                 username: str | None = None, password: str | None = None):
+        """
+        With no args: single shared credential from .env (stdio/local mode).
+        With bearer_token: per-user personal API token against the shared
+        tenant (remote/streamable-http mode) — see server.py's
+        _resolve_caller(). Basic Auth (username+password) is kept only for
+        local stdio use; it fails outright for any Replicon account with
+        2-step verification enabled, which is why remote mode uses bearer
+        tokens instead (see credentials.py).
+        """
+        self.base_url = base_url or get_base_url()
+        if bearer_token:
+            self.headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {bearer_token}",
+            }
+        elif username and password:
+            self.headers = {
+                "Content-Type": "application/json",
+                **basic_auth_header(username, password, get_company_key()),
+            }
+        else:
+            self.headers = {
+                "Content-Type": "application/json",
+                **get_auth_headers(),
+            }
 
     def _post(self, service: str, operation: str, payload: dict | None = None) -> dict:
         url = f"{self.base_url}/services/{service}.svc/{operation}"
@@ -44,7 +65,11 @@ class RepliconClient:
         try:
             response.raise_for_status()
         except requests.HTTPError as e:
-            raise RepliconAPIError(f"HTTP error calling {service}/{operation}: {e}") from e
+            detail = self._extract_error_detail(response)
+            message = f"HTTP error calling {service}/{operation}: {e}"
+            if detail:
+                message += f" — {detail}"
+            raise RepliconAPIError(message) from e
 
         body = response.json()
         if isinstance(body, dict) and body.get("error"):
@@ -52,6 +77,27 @@ class RepliconClient:
 
         # Most operations wrap the real payload in "d"; some return raw lists/objects
         return body.get("d", body) if isinstance(body, dict) else body
+
+    @staticmethod
+    def _extract_error_detail(response: requests.Response) -> str | None:
+        """
+        Replicon error responses carry human-readable detail in
+        error.details.notifications[].displayText (confirmed live, e.g.
+        "Time Entry already submitted." from TimeEntryRevisionGroupApprovalService1).
+        raise_for_status() only gives the generic HTTP reason phrase, so pull
+        this out separately to make RepliconAPIError messages actionable
+        instead of just "400 Client Error: Bad Request".
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+        error = body.get("error") if isinstance(body, dict) else None
+        if not isinstance(error, dict):
+            return None
+        notifications = (error.get("details") or {}).get("notifications") or []
+        texts = [n["displayText"] for n in notifications if n.get("displayText")]
+        return "; ".join(texts) if texts else error.get("reason")
 
     # ------------------------------------------------------------------
     # Projects
@@ -85,6 +131,58 @@ class RepliconClient:
         }
         return self._post("ProjectListService1", "GetData", payload)
 
+    def get_project_details(self, project_uri: str) -> dict:
+        """
+        Get full project details, including budget/estimate fields.
+
+        Confirmed endpoint: ProjectService1.svc/GetProjectDetails (verified
+        live, Jul 2026 — not previously used in this client). Returns
+        estimatedHours/estimatedCost (rolled up from task-level estimates
+        when the project's estimationMode is "Task Based") and
+        budget/budgetedHours/budgetedCost (a manual override, populated for
+        "Fixed"-mode projects). Every project probed on this tenant uses
+        Task Based mode, so budget/budgetedHours/budgetedCost were
+        consistently null and estimatedHours carried the real total —
+        callers should fall back to estimatedHours/estimatedCost when the
+        budgeted* fields are unset.
+        """
+        return self._post("ProjectService1", "GetProjectDetails", {"projectUri": project_uri})
+
+    PROJECT_ACTUALS_COLUMNS = [
+        "urn:replicon:project-list-column:project",
+        "urn:replicon:project-list-column:actual-hours",
+    ]
+
+    def get_project_actual_hours(self, project_uri: str) -> dict | None:
+        """
+        Get all-time actual hours logged against a single project (not
+        scoped to any week or user).
+
+        Filter confirmed live: urn:replicon:project-list-filter:project +
+        filter-operator:equal + {"value": {"uri": project_uri}}. The more
+        obvious ':uri' filter name is silently accepted but ignored by the
+        API (returns unfiltered rows) rather than erroring — confirmed by
+        probing a deliberately-invalid filter/column URI and seeing it
+        return data anyway — so it must not be used here.
+
+        Returns the single matching row dict (raw 'cells' shape from
+        ProjectListService1), or None if the project has no matching row.
+        """
+        payload = {
+            "page": 1,
+            "pagesize": 1,
+            "columnUris": self.PROJECT_ACTUALS_COLUMNS,
+            "sort": None,
+            "filterExpression": {
+                "leftExpression": {"filterDefinitionUri": "urn:replicon:project-list-filter:project"},
+                "operatorUri": "urn:replicon:filter-operator:equal",
+                "rightExpression": {"value": {"uri": project_uri}},
+            },
+        }
+        result = self._post("ProjectListService1", "GetData", payload)
+        rows = result.get("rows", [])
+        return rows[0] if rows else None
+
     # ------------------------------------------------------------------
     # Tasks
     # ------------------------------------------------------------------
@@ -104,6 +202,84 @@ class RepliconClient:
             "hierarchyListDataOptionUris": None,
         }
         return self._post("TaskListService1", "GetHierarchyDataForProject", payload)
+
+    def create_task(self, project_uri: str, name: str, parent_task_uri: str | None = None,
+                     code: str = "", description: str = "",
+                     start_date: dict | None = None, end_date: dict | None = None,
+                     estimated_hours: float | None = None,
+                     allow_time_entry: bool = True) -> dict:
+        """
+        Create a task under a project (optionally under a parent task).
+
+        Uses TaskService1.svc via the task-draft flow, which is Replicon's
+        documented and reliable path for building a new task:
+
+          1. CreateNewDraft(parentUri)  — create a draft as a child of the given
+             task OR project (the parent is parent_task_uri for a sub-task, else
+             the project itself). Returns the draft's URI.
+          2. Update* — set the draft's fields with the granular operations
+             (UpdateName / UpdateCode / UpdateDescription /
+             UpdateTimeEntryDateRange / UpdateEstimatedHours /
+             UpdateAllowTimeEntry).
+          3. PublishDraft(draftUri) — materialise the draft into a persisted task.
+             Returns a TaskReference1 for the new task.
+
+        Verified end-to-end against the live tenant with a create/read/delete
+        round-trip. (The atomic CreateTaskOrApplyModifications operation exists
+        too, but its request schema is not auto-generated and it proved brittle
+        for top-level task creation — the draft flow is used instead.)
+
+        Each request body is keyed by the operation's parameter names, per the
+        WCF/JSON convention used throughout this client (e.g. {"taskUri": ...}).
+
+        start_date / end_date: optional Replicon date dicts {"year","month","day"}
+        setting the task's time-entry date range.
+
+        estimated_hours: optional estimated effort as decimal hours (e.g. 7.5 for
+        7h 30m). Converted to a TaskDuration1 {"hours","minutes","seconds"} the
+        same way time-entry durations are (see put_time_entry).
+
+        Returns the raw TaskReference1 payload: {"uri", "name", "code",
+        "displayText", ...} for the newly created task.
+        """
+        # Parent is the parent task for a sub-task, otherwise the project itself
+        # (projects are the root of their own task hierarchy).
+        parent_uri = parent_task_uri or project_uri
+        draft = self._post("TaskService1", "CreateNewDraft", {"parentUri": parent_uri})
+        draft_uri = draft.get("uri") if isinstance(draft, dict) else draft
+        if not draft_uri:
+            raise RepliconAPIError(f"CreateNewDraft returned no draft URI: {draft!r}")
+
+        try:
+            self._post("TaskService1", "UpdateName", {"taskUri": draft_uri, "name": name})
+            if code:
+                self._post("TaskService1", "UpdateCode",
+                           {"taskUri": draft_uri, "code": code})
+            if description:
+                self._post("TaskService1", "UpdateDescription",
+                           {"taskUri": draft_uri, "description": description})
+            if start_date or end_date:
+                self._post("TaskService1", "UpdateTimeEntryDateRange", {
+                    "taskUri": draft_uri,
+                    "dateRange": {"startDate": start_date, "endDate": end_date},
+                })
+            if estimated_hours is not None:
+                whole_hours = int(estimated_hours)
+                minutes = round((estimated_hours - whole_hours) * 60)
+                self._post("TaskService1", "UpdateEstimatedHours", {
+                    "taskUri": draft_uri,
+                    "estimatedHours": {"hours": whole_hours, "minutes": minutes, "seconds": 0},
+                })
+            self._post("TaskService1", "UpdateAllowTimeEntry",
+                       {"taskUri": draft_uri, "allowTimeEntry": allow_time_entry})
+            return self._post("TaskService1", "PublishDraft", {"draftUri": draft_uri})
+        except Exception:
+            # Best-effort cleanup so a failed create doesn't leave an orphan draft.
+            try:
+                self._post("TaskService1", "Delete", {"taskUri": draft_uri})
+            except Exception:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # Timesheet read
@@ -243,6 +419,29 @@ class RepliconClient:
             "changeReason": change_reason,
         }
         return self._post("TimesheetApprovalService1", "Submit2", payload)
+
+    def submit_time_entry_revision_group(self, revision_group_uri: str, comments: str = "") -> dict:
+        """
+        Submit a single time entry revision group for approval — the
+        prerequisite step Replicon requires (on this tenant) before the
+        timesheet-level Submit2 will succeed. Confirmed live against
+        TimeEntryRevisionGroupApprovalService1.svc/Submit.
+
+        Same call shape as submit_timesheet/approve_timesheet/reopen_timesheet:
+        unitOfWorkId is a fresh caller-generated idempotency key per call.
+
+        No status precondition (unlike submit_timesheet/approve_timesheet) —
+        we have no confirmed status URI for revision groups. Callers should
+        treat RepliconAPIError here as soft failure (the group may already
+        be submitted from a prior attempt) and not let it block the overall
+        submit_timesheet flow.
+        """
+        payload = {
+            "timeEntryRevisionGroupUri": revision_group_uri,
+            "unitOfWorkId": str(uuid.uuid4()),
+            "comments": comments,
+        }
+        return self._post("TimeEntryRevisionGroupApprovalService1", "Submit", payload)
 
     # ------------------------------------------------------------------
     # User lookup

@@ -4,3 +4,7 @@ __pycache__/
 drafts.json
 project-task-naming.md
 .DS_Store
+*.db
+build/
+*.egg-info/
+.venv/

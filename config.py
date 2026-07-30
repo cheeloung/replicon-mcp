@@ -20,9 +20,28 @@ def get_base_url() -> str:
     return url
 
 
+def get_company_key() -> str:
+    """
+    Returns the shared Replicon company key (tenant identifier) — the same
+    for every teammate on this tenant, unlike a personal username/password.
+    """
+    company = os.getenv("REPLICON_COMPANY_KEY", "").strip()
+    if not company:
+        raise ValueError("REPLICON_COMPANY_KEY is not set in .env")
+    return company
+
+
+def basic_auth_header(username: str, password: str, company: str) -> dict:
+    """Build a Replicon HTTP Basic Auth header from company\\username:password."""
+    credentials = f"{company}\\{username}:{password}"
+    encoded = base64.b64encode(credentials.encode()).decode()
+    return {"Authorization": f"Basic {encoded}"}
+
+
 def get_auth_headers() -> dict:
     """
-    Returns Authorization header dict.
+    Returns Authorization header dict for the single shared credential
+    configured in this process's .env (stdio/local mode only).
     Bearer token takes precedence; falls back to HTTP Basic Auth.
     """
     bearer = os.getenv("REPLICON_BEARER_TOKEN", "").strip()
@@ -31,18 +50,9 @@ def get_auth_headers() -> dict:
 
     username = os.getenv("REPLICON_USERNAME", "").strip()
     password = os.getenv("REPLICON_PASSWORD", "").strip()
-    company = os.getenv("REPLICON_COMPANY_KEY", "").strip()
 
     if username and password:
-        if not company:
-            raise ValueError(
-                "REPLICON_COMPANY_KEY is required when using Basic Auth "
-                "(REPLICON_USERNAME + REPLICON_PASSWORD)."
-            )
-        # Replicon basic auth format: company\username:password
-        credentials = f"{company}\\{username}:{password}"
-        encoded = base64.b64encode(credentials.encode()).decode()
-        return {"Authorization": f"Basic {encoded}"}
+        return basic_auth_header(username, password, get_company_key())
 
     raise ValueError(
         "No auth configured. Set REPLICON_BEARER_TOKEN, or "
@@ -66,8 +76,8 @@ def get_user_uri() -> str:
     Required for tools that operate on 'my' timesheet or filter pending
     approvals by the current approver.
 
-    To find your URI: call TimeEntryService3/GetTimeEntriesForUserAndDateRange
-    for any week — your user URI appears in the 'user.uri' field of each entry.
+    To find your URI: run `python find_my_user_uri.py "Your Name"` (only needs
+    REPLICON_BASE_URL and your auth already set in .env — see README.md).
     Format: urn:replicon-tenant:{tenant_id}:user:{id}
     """
     uri = os.getenv("REPLICON_USER_URI", "").strip()

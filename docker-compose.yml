@@ -1,0 +1,22 @@
+services:
+  replicon-mcp:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Bind to localhost only — the reverse proxy (Caddy) on the VM
+      # terminates TLS and proxies to this port; the container is never
+      # reachable directly from outside the VM. Port 8001, not 8000 —
+      # tuleap-mcp already uses 8000 on this same host.
+      - "127.0.0.1:8001:8001"
+    env_file:
+      - .env
+    volumes:
+      - credential-store:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  credential-store:

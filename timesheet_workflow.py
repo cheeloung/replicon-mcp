@@ -8,8 +8,14 @@ fresh from Replicon and merges with local drafts — never shows
 drafts-only or Replicon-only by accident.
 """
 
-from replicon_client import RepliconClient, TimesheetStateError
+from replicon_client import (
+    RepliconClient,
+    RepliconAPIError,
+    TimesheetStateError,
+    TIMESHEET_STATUS_OPEN,
+)
 import draft_store
+import response_shapes
 
 
 def get_timesheet_view(client: RepliconClient, user_uri: str,
@@ -39,6 +45,41 @@ def get_timesheet_view(client: RepliconClient, user_uri: str,
         "timesheet_status": current_status,
         "timesheet_uri": timesheet_details.get("timesheet", {}).get("uri"),
     }
+
+
+def get_project_budgets_for_rows(client: RepliconClient, shaped_rows: list[dict]) -> dict:
+    """
+    Fetch a "used vs total" hours budget summary for every distinct project
+    appearing in a set of shaped timesheet rows (see
+    response_shapes.shape_time_entries).
+
+    Rows with only a task_uri and no project_uri are skipped — see the
+    grouping-rule caveat in response_shapes.py's module docstring, this is
+    the same limitation.
+
+    Per-project lookups are independent: a RepliconAPIError on one project
+    is recorded as {"error": str(e)} for that URI rather than failing the
+    whole call, since one inaccessible/deleted project shouldn't blank out
+    budget data for the rest of the timesheet.
+
+    Returns: {project_uri: shape_project_budget(...) | {"error": str}, ...}
+    """
+    project_uris = sorted({
+        r["project_uri"] for r in shaped_rows if r.get("project_uri")
+    })
+
+    budgets = {}
+    for project_uri in project_uris:
+        try:
+            details = client.get_project_details(project_uri)
+            actuals_row = client.get_project_actual_hours(project_uri)
+            budgets[project_uri] = response_shapes.shape_project_budget(
+                project_uri, details, actuals_row
+            )
+        except RepliconAPIError as e:
+            budgets[project_uri] = {"error": str(e)}
+
+    return budgets
 
 
 def stage_entry(user_uri: str, week_start: dict, week_end: dict,
@@ -128,4 +169,69 @@ def push_drafts(client: RepliconClient, user_uri: str,
         "block_reason": None,
         "succeeded": succeeded,
         "failed": failed,
+    }
+
+
+def submit_timesheet(client: RepliconClient, user_uri: str,
+                      week_start: dict, week_end: dict,
+                      comments: str = "") -> dict:
+    """
+    Submit the week's timesheet for approval — submitting each underlying
+    time entry revision group first. Mirrors the "Submit X time entry(s)"
+    + "Submit timesheet" two-button flow in the Replicon web UI, which this
+    tenant requires (see replicon_client.submit_time_entry_revision_group).
+
+    - Fetches timesheet details fresh (status + uri).
+    - If status is 'open', collects distinct revisionGroupUri values from
+      this week's committed entries (get_time_entries_for_date_range — the
+      field is already present on every raw entry) and submits each one.
+      Per-group failure is soft: recorded, doesn't stop the rest or block
+      the timesheet-level submit that follows.
+    - Always attempts the existing client.submit_timesheet() afterwards;
+      its TimesheetStateError/RepliconAPIError propagate unchanged.
+
+    Returns:
+        {
+            "revision_groups_submitted": [uri, ...],
+            "revision_groups_failed": [{"uri": ..., "error": ...}, ...],
+            "revision_groups_total": int,
+            "timesheet_response": dict,   # raw Submit2 response
+        }
+    """
+    timesheet_details = client.get_timesheet_for_date(user_uri, week_start)
+    timesheet = timesheet_details.get("timesheet", {})
+    timesheet_uri = timesheet.get("uri")
+    current_status = timesheet.get("statusUri")
+
+    if not timesheet_uri:
+        raise TimesheetStateError(
+            "Could not retrieve timesheet URI. Does a timesheet exist for this week?"
+        )
+
+    revision_groups_submitted = []
+    revision_groups_failed = []
+
+    if current_status == TIMESHEET_STATUS_OPEN:
+        entries = client.get_time_entries_for_date_range(user_uri, week_start, week_end)
+        revision_group_uris = sorted({
+            e["revisionGroupUri"] for e in entries if e.get("revisionGroupUri")
+        })
+        for uri in revision_group_uris:
+            try:
+                client.submit_time_entry_revision_group(uri, comments=comments)
+                revision_groups_submitted.append(uri)
+            except RepliconAPIError as e:
+                revision_groups_failed.append({"uri": uri, "error": str(e)})
+
+    timesheet_response = client.submit_timesheet(
+        timesheet_uri=timesheet_uri,
+        current_status_uri=current_status,
+        comments=comments,
+    )
+
+    return {
+        "revision_groups_submitted": revision_groups_submitted,
+        "revision_groups_failed": revision_groups_failed,
+        "revision_groups_total": len(revision_groups_submitted) + len(revision_groups_failed),
+        "timesheet_response": timesheet_response,
     }
