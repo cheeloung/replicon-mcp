@@ -115,14 +115,14 @@ you never need any special "override" flags.
 ```
 python -m venv venv
 venv\Scripts\activate.bat
-pip install -r requirements.txt
+pip install .
 ```
 
 **Windows (PowerShell):**
 ```
 python -m venv venv
 venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install .
 ```
 If `Activate.ps1` gives an error about running scripts being disabled, see
 Troubleshooting — there's a one-line fix.
@@ -131,7 +131,7 @@ Troubleshooting — there's a one-line fix.
 ```bash
 python3.11 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install .
 ```
 
 You'll know the virtual environment is active because your terminal prompt

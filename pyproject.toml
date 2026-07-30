@@ -1,0 +1,49 @@
+[project]
+name = "replicon-mcp"
+version = "0.1.0"
+description = "Replicon Timesheet MCP Server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    # Pinned exact: an unpinned floor let a fresh Docker build silently pick
+    # up mcp 2.0.0, which removed mcp.server.fastmcp entirely (renamed to
+    # mcp.server.mcpserver, a different API) and crash-looped a sibling
+    # deployment (tuleap-mcp) with no code change on our end. Bump
+    # deliberately, and only after porting to the new API, not automatically.
+    "mcp[cli]==1.28.1",
+    "requests>=2.31.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+# Only needed when TRANSPORT=streamable-http (hosted, multi-user mode).
+# Local stdio usage (the default) doesn't need these.
+remote = [
+    "cryptography>=42.0.0",
+    "msal>=1.28.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    # Pinned exact: an unpinned floor let CI silently pick up a ruff release
+    # with changed default lint/format behavior and broke CI with no code
+    # change on our end (same incident class as the mcp pin above, seen on
+    # tuleap-mcp's rollout). Bump deliberately, not automatically.
+    "ruff==0.15.22",
+]
+
+[project.scripts]
+replicon-mcp = "server:main"
+
+[tool.setuptools]
+py-modules = [
+    "server",
+    "config",
+    "replicon_client",
+    "response_shapes",
+    "timesheet_workflow",
+    "draft_store",
+    "credentials",
+    "oauth_provider",
+    "onboarding",
+]

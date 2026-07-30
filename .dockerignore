@@ -1,0 +1,10 @@
+.venv/
+.git/
+.github/
+docs/
+*.db
+.env
+drafts.json
+project-task-naming.md
+__pycache__/
+*.pyc

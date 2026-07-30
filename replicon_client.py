@@ -11,7 +11,7 @@ API style notes:
 
 import uuid
 import requests
-from config import get_base_url, get_auth_headers, TULEAP_FIELD_URI
+from config import get_base_url, get_auth_headers, get_company_key, basic_auth_header, TULEAP_FIELD_URI
 
 
 class RepliconAPIError(Exception):
@@ -30,12 +30,24 @@ TIMESHEET_STATUS_WAITING = "urn:replicon:timesheet-status:waiting"  # submitted,
 
 
 class RepliconClient:
-    def __init__(self):
-        self.base_url = get_base_url()
-        self.headers = {
-            "Content-Type": "application/json",
-            **get_auth_headers(),
-        }
+    def __init__(self, base_url: str | None = None, username: str | None = None,
+                 password: str | None = None):
+        """
+        With no args: single shared credential from .env (stdio/local mode).
+        With username+password: per-user Basic Auth against the shared tenant
+        (remote/streamable-http mode) — see server.py's _resolve_caller().
+        """
+        self.base_url = base_url or get_base_url()
+        if username and password:
+            self.headers = {
+                "Content-Type": "application/json",
+                **basic_auth_header(username, password, get_company_key()),
+            }
+        else:
+            self.headers = {
+                "Content-Type": "application/json",
+                **get_auth_headers(),
+            }
 
     def _post(self, service: str, operation: str, payload: dict | None = None) -> dict:
         url = f"{self.base_url}/services/{service}.svc/{operation}"
