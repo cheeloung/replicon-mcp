@@ -7,10 +7,16 @@ that).
 
 In this mode, one server instance is shared by the whole team. It
 authenticates callers via Entra ID (so no shared secret exists), and each
-person links their own personal Replicon username/password once via a
-`/link` web page. Local stdio usage is unaffected — `TRANSPORT` defaults to
-`stdio` and none of this applies unless it's explicitly set to
-`streamable-http`.
+person links their own personal Replicon API token once via a `/link` web
+page. Local stdio usage is unaffected — `TRANSPORT` defaults to `stdio` and
+none of this applies unless it's explicitly set to `streamable-http`.
+
+**Bearer token, not username/password**: `/link` collects a personal
+Replicon API token, not a username/password, because Basic Auth fails
+outright (a generic 401, no useful error) for any Replicon account with
+2-step verification enabled — confirmed live during this deployment's own
+rollout. Generate a token per
+[Replicon's API token guide](https://sb1.replicon.com/services/docs/security.html).
 
 ## One-time setup
 
@@ -91,25 +97,27 @@ Each teammate:
 1. Adds `https://replicon-mcp.kranzwolfe.com` as a custom Connector in
    claude.ai and completes the Entra login prompt it triggers.
 2. Visits `https://replicon-mcp.kranzwolfe.com/link` once, signs in again
-   (same Entra tenant), and enters their normal Replicon username/password
-   plus their name as it appears in Replicon. The page searches Replicon for
-   that name and asks them to confirm (or pick from) the match(es) — this
-   extra step exists because Replicon has no direct "who am I" lookup, so
-   the user's Replicon user URI can't be resolved from their login alone.
+   (same Entra tenant), generates a personal Replicon API token (the page
+   links to [Replicon's guide](https://sb1.replicon.com/services/docs/security.html)
+   for this), and pastes it in along with their name as it appears in
+   Replicon. The page searches Replicon for that name and asks them to
+   confirm (or pick from) the match(es) — this extra step exists because
+   Replicon has no direct "who am I" lookup, so the user's Replicon user URI
+   can't be resolved from their login alone.
 
 After that, their Claude sessions use their own Replicon identity
 automatically — no local install, no shared credential.
 
 ## Operations
 
-- **Revoke a user's Replicon link** (e.g. they changed their Replicon
-  password, or offboarding): connect to the VM and run
+- **Revoke a user's Replicon link** (e.g. they rotated their API token, or
+  offboarding): connect to the VM and run
   `python -c "import credentials; credentials.delete_replicon_credentials('<their-entra-oid>')"`
   inside the container. They'll need to visit `/link` again afterward.
 - **Rotate `CREDENTIAL_STORE_KEY`**: this re-encrypts nothing automatically
   — rotating it invalidates every stored credential, so treat it as
   "everyone re-links," not a routine rotation.
-- **Logs**: the server never logs Replicon passwords or Entra tokens — if
+- **Logs**: the server never logs Replicon API tokens or Entra tokens — if
   you need to debug an auth failure, check for `CredentialsMissingError`
   (means the user hasn't visited `/link` yet) vs. a `None` from the token
   verifier (means the incoming bearer token itself failed validation —

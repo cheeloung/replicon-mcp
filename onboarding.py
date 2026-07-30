@@ -1,11 +1,17 @@
 """The one-time '/link' web flow: a user signs in with Entra ID, then enters
-their personal Replicon username/password so future MCP calls made under
+their personal Replicon API (bearer) token so future MCP calls made under
 their Entra identity can use their own Replicon credentials.
+
+Bearer token, not username/password: Basic Auth fails outright (401) for any
+Replicon account with 2-step verification enabled — confirmed live against
+this tenant. A personal API token generated per
+https://sb1.replicon.com/services/docs/security.html sidesteps MFA entirely,
+so the /link form collects that instead and guides the user to that page.
 
 Unlike tuleap-mcp's onboarding (a single URL + API key form), Replicon has no
 "who am I" endpoint — the same gap find_my_user_uri.py works around locally
 by searching for yourself by name. So this flow has an extra step: after
-collecting credentials, it searches Replicon for the display name the user
+collecting the token, it searches Replicon for the display name the user
 typed and has them confirm (or pick from) the match(es) before storing
 anything.
 
@@ -35,9 +41,9 @@ _LOGIN_SCOPES = ["User.Read"]
 _pending_flows: dict[str, dict] = {}
 
 # Bridges /link/search -> /link/submit: holds the just-submitted Replicon
-# username/password (already validated by find_users succeeding) so the
-# confirm/select step doesn't need to round-trip a plaintext password
-# through the browser a second time. Keyed by the same link_code as
+# bearer token (already validated by find_users succeeding) so the
+# confirm/select step doesn't need to round-trip the token through the
+# browser a second time. Keyed by the same link_code as
 # credentials.link_sessions. In-memory only, never persisted, cleared as
 # soon as /link/submit consumes it.
 _pending_credentials: dict[str, dict] = {}
@@ -66,17 +72,19 @@ def _credentials_form(link_code: str, error: str = "") -> str:
     return f"""
         <html><body style="font-family: sans-serif; max-width: 32rem; margin: 3rem auto;">
         <h2>Link your Replicon account</h2>
-        <p>Signed in. Enter your normal Replicon login below, plus your name as it
-        appears in Replicon (used to find your account — Replicon has no direct
-        "who am I" lookup). Your password is stored encrypted and only used for
-        MCP calls made under your identity.</p>
+        <p>Signed in. You'll need a personal Replicon API token (your normal
+        password won't work here if you have 2-step verification enabled —
+        most accounts do). Generate one by following
+        <a href="https://sb1.replicon.com/services/docs/security.html" target="_blank"
+           rel="noopener">Replicon's API token guide</a>, then paste it below along
+        with your name as it appears in Replicon (used to find your account —
+        Replicon has no direct "who am I" lookup). The token is stored encrypted
+        and only used for MCP calls made under your identity.</p>
         {error_html}
         <form method="post" action="/link/search">
             <input type="hidden" name="link_code" value="{html.escape(link_code)}">
-            <p><label>Replicon username (your login email)<br>
-                <input name="username" type="text" required style="width:100%"></label></p>
-            <p><label>Replicon password<br>
-                <input name="password" type="password" required style="width:100%"></label></p>
+            <p><label>Replicon API token<br>
+                <input name="bearer_token" type="password" required style="width:100%"></label></p>
             <p><label>Your name as it appears in Replicon<br>
                 <input name="display_name" type="text" required style="width:100%"
                        placeholder="e.g. Cheah, Chee Loung"></label></p>
@@ -125,19 +133,18 @@ async def _link_callback(request: Request):
 async def _link_search(request: Request):
     form = await request.form()
     link_code = form.get("link_code") or ""
-    username = (form.get("username") or "").strip()
-    password = (form.get("password") or "").strip()
+    bearer_token = (form.get("bearer_token") or "").strip()
     display_name = (form.get("display_name") or "").strip()
 
     if credentials.peek_link_session(link_code) is None:
         return HTMLResponse(
             "This link session expired — go back and try /link again.", status_code=400
         )
-    if not username or not password or not display_name:
+    if not bearer_token or not display_name:
         return HTMLResponse(_credentials_form(link_code, "All fields are required."))
 
     try:
-        client = RepliconClient(config.get_base_url(), username=username, password=password)
+        client = RepliconClient(config.get_base_url(), bearer_token=bearer_token)
         raw = client.find_users(name_search=display_name)
     except RepliconAPIError as e:
         return HTMLResponse(
@@ -150,7 +157,7 @@ async def _link_search(request: Request):
             _credentials_form(link_code, f"No Replicon user found matching '{display_name}'. Try a shorter name.")
         )
 
-    _pending_credentials[link_code] = {"username": username, "password": password}
+    _pending_credentials[link_code] = {"bearer_token": bearer_token}
 
     options = "\n".join(
         f'<p><label><input type="radio" name="user_uri" value="{html.escape(m["uri"])}" '
@@ -185,7 +192,7 @@ async def _link_submit(request: Request):
         return HTMLResponse("No account selected.", status_code=400)
 
     credentials.set_replicon_credentials(
-        subject, pending["username"], pending["password"], user_uri
+        subject, pending["bearer_token"], user_uri
     )
     return HTMLResponse(
         "<html><body style='font-family: sans-serif; max-width: 32rem; margin: 3rem auto;'>"

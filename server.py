@@ -83,8 +83,8 @@ def _resolve_caller() -> tuple[RepliconClient, str]:
         raise CredentialsMissingError(
             f"No Replicon account linked yet for this user. Visit {public_url}/link to link one."
         )
-    username, password, user_uri = creds
-    return RepliconClient(config.get_base_url(), username=username, password=password), user_uri
+    bearer_token, user_uri = creds
+    return RepliconClient(config.get_base_url(), bearer_token=bearer_token), user_uri
 
 
 # Set in _build_mcp() when TRANSPORT != stdio — referenced by the

@@ -30,15 +30,24 @@ TIMESHEET_STATUS_WAITING = "urn:replicon:timesheet-status:waiting"  # submitted,
 
 
 class RepliconClient:
-    def __init__(self, base_url: str | None = None, username: str | None = None,
-                 password: str | None = None):
+    def __init__(self, base_url: str | None = None, bearer_token: str | None = None,
+                 username: str | None = None, password: str | None = None):
         """
         With no args: single shared credential from .env (stdio/local mode).
-        With username+password: per-user Basic Auth against the shared tenant
-        (remote/streamable-http mode) — see server.py's _resolve_caller().
+        With bearer_token: per-user personal API token against the shared
+        tenant (remote/streamable-http mode) — see server.py's
+        _resolve_caller(). Basic Auth (username+password) is kept only for
+        local stdio use; it fails outright for any Replicon account with
+        2-step verification enabled, which is why remote mode uses bearer
+        tokens instead (see credentials.py).
         """
         self.base_url = base_url or get_base_url()
-        if username and password:
+        if bearer_token:
+            self.headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {bearer_token}",
+            }
+        elif username and password:
             self.headers = {
                 "Content-Type": "application/json",
                 **basic_auth_header(username, password, get_company_key()),
