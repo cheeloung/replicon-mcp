@@ -101,7 +101,7 @@ def _pretty(obj) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def get_my_timesheet(week_date: str) -> str:
+def get_my_timesheet(week_date: str, include_project_budget: bool = True) -> str:
     """
     Read your timesheet for the week containing the given date.
 
@@ -111,6 +111,10 @@ def get_my_timesheet(week_date: str) -> str:
     Args:
         week_date: Any date in the target week, as "YYYY-MM-DD".
                    The server computes the Monday–Sunday range automatically.
+        include_project_budget: When True (default), also fetch a "used vs
+                   total" hours budget summary for each distinct project on
+                   the timesheet (2 extra read-only API calls per distinct
+                   project). Set False to skip and speed up the call.
 
     Returns JSON with:
         timesheet_status  — current status URI (open / waiting / etc.)
@@ -120,6 +124,10 @@ def get_my_timesheet(week_date: str) -> str:
         drafts            — local staged entries not yet pushed
         week_start        — computed Monday of the week
         week_end          — computed Sunday of the week
+        project_budgets   — (when include_project_budget) {project_uri: {
+                            estimation_mode, budgeted_hours, actual_hours,
+                            hours_remaining, percent_used}, ...} — actual_hours
+                            is the project's all-time total, not just this week
     """
     week_start, week_end = _week_bounds(week_date)
 
@@ -129,7 +137,7 @@ def get_my_timesheet(week_date: str) -> str:
 
     shaped_rows = response_shapes.shape_time_entries(view["committed"])
 
-    return _pretty({
+    result = {
         "week_start": week_start,
         "week_end": week_end,
         "timesheet_status": view["timesheet_status"],
@@ -139,7 +147,12 @@ def get_my_timesheet(week_date: str) -> str:
             sum(r["total_hours"] for r in shaped_rows), 4
         ),
         "drafts": view["drafts"],
-    })
+    }
+    if include_project_budget:
+        result["project_budgets"] = timesheet_workflow.get_project_budgets_for_rows(
+            _client, shaped_rows
+        )
+    return _pretty(result)
 
 
 @mcp.tool()
@@ -619,7 +632,9 @@ def get_pending_approvals() -> str:
 
 
 @mcp.tool()
-def get_team_member_timesheet(user_uri: str, week_date: str) -> str:
+def get_team_member_timesheet(
+    user_uri: str, week_date: str, include_project_budget: bool = True
+) -> str:
     """
     View a team member's timesheet entries for a given week.
 
@@ -629,8 +644,16 @@ def get_team_member_timesheet(user_uri: str, week_date: str) -> str:
     Args:
         user_uri:  The team member's full Replicon user URI.
         week_date: Any date in their target week ("YYYY-MM-DD").
+        include_project_budget: When True (default), also fetch a "used vs
+                   total" hours budget summary for each distinct project on
+                   the timesheet (2 extra read-only API calls per distinct
+                   project). Set False to skip and speed up the call.
 
-    Returns shaped time entry rows + timesheet metadata.
+    Returns shaped time entry rows + timesheet metadata, plus (when
+    include_project_budget) a project_budgets dict keyed by project_uri with
+    {estimation_mode, budgeted_hours, actual_hours, hours_remaining,
+    percent_used} — actual_hours is the project's all-time total, not just
+    this week.
     """
     week_start, week_end = _week_bounds(week_date)
 
@@ -647,6 +670,10 @@ def get_team_member_timesheet(user_uri: str, week_date: str) -> str:
         timesheet_status=ts.get("statusUri", ""),
         raw_entries=raw_entries,
     )
+    if include_project_budget:
+        shaped["project_budgets"] = timesheet_workflow.get_project_budgets_for_rows(
+            _client, shaped["rows"]
+        )
     return _pretty(shaped)
 
 

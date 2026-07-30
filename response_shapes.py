@@ -46,6 +46,23 @@ def _parse_hours(interval: dict | None) -> float | None:
     return round(total, 4) if total else None
 
 
+def _duration_to_hours(d: dict | None) -> float | None:
+    """
+    Convert a {"hours", "minutes", "seconds", ...} duration dict to decimal
+    hours. Used for project budget/estimate fields (estimatedHours,
+    budgetedHours, the actual-hours list column's calendarDayDurationValue).
+
+    Distinct from _parse_hours (used for time-entry intervals, where a total
+    of 0 means "no entry" and is normalised to None): here 0.0 is a
+    meaningful budget/actual value in its own right — only a missing dict
+    means "not set".
+    """
+    if d is None:
+        return None
+    total = d.get("hours", 0) + d.get("minutes", 0) / 60 + d.get("seconds", 0) / 3600
+    return round(total, 4)
+
+
 def _date_key(entry_date: dict) -> str:
     """Convert {year, month, day} dict to 'YYYY-MM-DD' string."""
     return f"{entry_date['year']}-{entry_date['month']:02d}-{entry_date['day']:02d}"
@@ -245,6 +262,60 @@ def shape_created_task(raw_response: dict) -> dict:
         "name": ref.get("name"),
         "code": ref.get("code"),
         "display_text": ref.get("displayText"),
+    }
+
+
+def shape_project_budget(project_uri: str, details: dict, actuals_row: dict | None) -> dict:
+    """
+    Hours-based "used vs total" budget summary for one project, combining
+    ProjectService1/GetProjectDetails (total) with a single ProjectListService1
+    actual-hours row (used, all-time — not scoped to any week or user).
+
+    budgeted_hours prefers the manual budgetedHours override (set on
+    "Fixed"-mode projects) and falls back to estimatedHours (the "Task
+    Based" rollup from task-level estimates) when unset — see
+    RepliconClient.get_project_details for why both exist.
+
+    All fields are None when the project has no budget data at all, rather
+    than showing misleading zeros.
+
+    Output:
+    {
+        "project_uri": str,
+        "estimation_mode": str | None,   # e.g. "Task Based" — for context
+        "budgeted_hours": float | None,
+        "actual_hours": float | None,
+        "hours_remaining": float | None, # budgeted - actual; negative = over budget
+        "percent_used": float | None,    # actual / budgeted * 100, 1 decimal
+    }
+    """
+    budgeted_hours = _duration_to_hours(details.get("budgetedHours"))
+    if budgeted_hours is None:
+        budgeted_hours = _duration_to_hours(details.get("estimatedHours"))
+
+    actual_hours = None
+    if actuals_row:
+        for cell in actuals_row.get("cells", []):
+            if cell.get("dataType") == "urn:replicon:list-type:calendar-day-duration":
+                actual_hours = _duration_to_hours(cell.get("calendarDayDurationValue"))
+                break
+
+    hours_remaining = (
+        round(budgeted_hours - actual_hours, 4)
+        if budgeted_hours is not None and actual_hours is not None else None
+    )
+    percent_used = (
+        round(actual_hours / budgeted_hours * 100, 1)
+        if actual_hours is not None and budgeted_hours else None
+    )
+
+    return {
+        "project_uri": project_uri,
+        "estimation_mode": (details.get("estimationMode") or {}).get("displayText"),
+        "budgeted_hours": budgeted_hours,
+        "actual_hours": actual_hours,
+        "hours_remaining": hours_remaining,
+        "percent_used": percent_used,
     }
 
 

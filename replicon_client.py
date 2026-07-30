@@ -110,6 +110,58 @@ class RepliconClient:
         }
         return self._post("ProjectListService1", "GetData", payload)
 
+    def get_project_details(self, project_uri: str) -> dict:
+        """
+        Get full project details, including budget/estimate fields.
+
+        Confirmed endpoint: ProjectService1.svc/GetProjectDetails (verified
+        live, Jul 2026 — not previously used in this client). Returns
+        estimatedHours/estimatedCost (rolled up from task-level estimates
+        when the project's estimationMode is "Task Based") and
+        budget/budgetedHours/budgetedCost (a manual override, populated for
+        "Fixed"-mode projects). Every project probed on this tenant uses
+        Task Based mode, so budget/budgetedHours/budgetedCost were
+        consistently null and estimatedHours carried the real total —
+        callers should fall back to estimatedHours/estimatedCost when the
+        budgeted* fields are unset.
+        """
+        return self._post("ProjectService1", "GetProjectDetails", {"projectUri": project_uri})
+
+    PROJECT_ACTUALS_COLUMNS = [
+        "urn:replicon:project-list-column:project",
+        "urn:replicon:project-list-column:actual-hours",
+    ]
+
+    def get_project_actual_hours(self, project_uri: str) -> dict | None:
+        """
+        Get all-time actual hours logged against a single project (not
+        scoped to any week or user).
+
+        Filter confirmed live: urn:replicon:project-list-filter:project +
+        filter-operator:equal + {"value": {"uri": project_uri}}. The more
+        obvious ':uri' filter name is silently accepted but ignored by the
+        API (returns unfiltered rows) rather than erroring — confirmed by
+        probing a deliberately-invalid filter/column URI and seeing it
+        return data anyway — so it must not be used here.
+
+        Returns the single matching row dict (raw 'cells' shape from
+        ProjectListService1), or None if the project has no matching row.
+        """
+        payload = {
+            "page": 1,
+            "pagesize": 1,
+            "columnUris": self.PROJECT_ACTUALS_COLUMNS,
+            "sort": None,
+            "filterExpression": {
+                "leftExpression": {"filterDefinitionUri": "urn:replicon:project-list-filter:project"},
+                "operatorUri": "urn:replicon:filter-operator:equal",
+                "rightExpression": {"value": {"uri": project_uri}},
+            },
+        }
+        result = self._post("ProjectListService1", "GetData", payload)
+        rows = result.get("rows", [])
+        return rows[0] if rows else None
+
     # ------------------------------------------------------------------
     # Tasks
     # ------------------------------------------------------------------

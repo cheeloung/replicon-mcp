@@ -15,6 +15,7 @@ from replicon_client import (
     TIMESHEET_STATUS_OPEN,
 )
 import draft_store
+import response_shapes
 
 
 def get_timesheet_view(client: RepliconClient, user_uri: str,
@@ -44,6 +45,41 @@ def get_timesheet_view(client: RepliconClient, user_uri: str,
         "timesheet_status": current_status,
         "timesheet_uri": timesheet_details.get("timesheet", {}).get("uri"),
     }
+
+
+def get_project_budgets_for_rows(client: RepliconClient, shaped_rows: list[dict]) -> dict:
+    """
+    Fetch a "used vs total" hours budget summary for every distinct project
+    appearing in a set of shaped timesheet rows (see
+    response_shapes.shape_time_entries).
+
+    Rows with only a task_uri and no project_uri are skipped — see the
+    grouping-rule caveat in response_shapes.py's module docstring, this is
+    the same limitation.
+
+    Per-project lookups are independent: a RepliconAPIError on one project
+    is recorded as {"error": str(e)} for that URI rather than failing the
+    whole call, since one inaccessible/deleted project shouldn't blank out
+    budget data for the rest of the timesheet.
+
+    Returns: {project_uri: shape_project_budget(...) | {"error": str}, ...}
+    """
+    project_uris = sorted({
+        r["project_uri"] for r in shaped_rows if r.get("project_uri")
+    })
+
+    budgets = {}
+    for project_uri in project_uris:
+        try:
+            details = client.get_project_details(project_uri)
+            actuals_row = client.get_project_actual_hours(project_uri)
+            budgets[project_uri] = response_shapes.shape_project_budget(
+                project_uri, details, actuals_row
+            )
+        except RepliconAPIError as e:
+            budgets[project_uri] = {"error": str(e)}
+
+    return budgets
 
 
 def stage_entry(user_uri: str, week_start: dict, week_end: dict,
