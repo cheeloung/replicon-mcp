@@ -30,6 +30,7 @@ Deliberately NOT exposed: raw put_time_entry (use stage → push instead).
 """
 
 import json
+import logging
 import os
 from datetime import date, timedelta
 
@@ -138,6 +139,22 @@ if TRANSPORT != "stdio":
     import onboarding
 
     onboarding.register(mcp)
+
+    # Confirmed live 2026-08-06: a relative CREDENTIAL_DB_PATH resolves
+    # against the container's WORKDIR, not the mounted volume, so every
+    # linked Replicon credential is silently lost on the next container
+    # recreation — no error anywhere, decrypt just starts returning None
+    # (indistinguishable from "never linked"). Fail loudly instead.
+    _cred_db_path = os.getenv("CREDENTIAL_DB_PATH", "")
+    if _cred_db_path and not os.path.isabs(_cred_db_path):
+        logging.getLogger(__name__).warning(
+            "CREDENTIAL_DB_PATH=%r is a relative path. It will resolve against "
+            "the container's WORKDIR, NOT the mounted volume — every linked "
+            "Replicon credential will be silently lost on the next container "
+            "recreation. Set it to an absolute path under the mounted volume "
+            "(e.g. /data/replicon-mcp-credentials.db).",
+            _cred_db_path,
+        )
 
     @mcp.custom_route("/health", methods=["GET"])
     async def health_check(request: Request) -> JSONResponse:
