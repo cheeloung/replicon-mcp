@@ -285,15 +285,23 @@ Use a single mental model for timesheet retrieval — "get timesheet":
 
 Always display results with human-readable project/task names, not URIs.
 Format daily hours as a Mon–Sun table. Show tuleap refs and comments inline.
+Each committed row also carries is_billable (true/false/null — null means
+Replicon never computed it for that entry, seen on some older API-created
+rows). Show it inline alongside the other fields, and use it to answer
+billable-vs-non-client questions directly from get_my_timesheet /
+get_team_member_timesheet without extra calls.
 
 ## Timesheet Entry — Draft First, Always
 Never call push_drafts unless the user explicitly says to push, submit,
 confirm, or equivalent.
 
 Workflow:
-1. Call stage_time_entry for each entry the user describes.
+1. Call stage_time_entry for each entry the user describes. Set is_billable:
+   True for client project work, False for internal/non-client work (e.g.
+   AI Learning, KWA General, Leave, other tasks/e-learning buckets). If the
+   project isn't clearly one or the other, ask rather than guessing.
 2. Show a formatted summary of all staged entries (project/task name, date,
-   hours, tuleap ref, comments).
+   hours, tuleap ref, comments, billable flag).
 3. Wait for explicit push confirmation before calling push_drafts.
 
 If the user edits a staged entry, call edit_staged_entry and re-display the
@@ -329,6 +337,15 @@ the timesheet itself — no separate step needed.
 - Project-level entries (no task): only project_uri is set.
 - Weeks start on Monday.
 - timesheet_status "open" = editable; "waiting" = submitted, pending approval.
+- Entries pushed via this MCP always carry both "attendance" and "project"
+  time-allocation types, matching UI-created entries — required for entries
+  to appear in Replicon's standard timesheet report (confirmed 2026-08-05;
+  entries missing "attendance" are silently excluded from that report even
+  though fully committed/submittable).
+- is_billable is a full read/write field, not just a push-time flag:
+  stage_time_entry/edit_staged_entry set it on push, and get_my_timesheet/
+  get_team_member_timesheet return it per row (read back from Replicon's
+  is-billable custom metadata) — added 2026-08-05.
 
 ## Future Integration Note
 Tuleap reference numbers in timesheet entries will eventually link to Tuleap
@@ -409,3 +426,17 @@ folder if this happens.
   step (TimeEntryRevisionGroupApprovalService1/Submit) before the
   timesheet-level submit (TimesheetApprovalService1/Submit2).
 - ⏳ Approve timesheets — still not yet verified against a real write.
+- 🐛→✅ Fixed 2026-08-05: entries pushed via put_time_entry were missing the
+  "attendance" time-allocation type that UI-created entries always carry,
+  making them invisible to Replicon's standard timesheet report despite
+  being fully committed. Root-caused by comparing raw GetTimeEntriesFor...
+  payloads for an API-created entry vs. a manually-duplicated UI entry with
+  otherwise identical project/task/date/hours. Also added an explicit
+  is_billable flag (stage_time_entry/edit_staged_entry) since API-created
+  entries didn't reliably get Replicon's automatic billable/billing-rate
+  computation either.
+- ✅ is_billable read support added 2026-08-05: shape_time_entries
+  (response_shapes.py) now extracts is-billable from each entry's
+  customMetadata, so get_my_timesheet/get_team_member_timesheet return it
+  per row — verified against live data (True for AMAG/ISL client rows,
+  False for AI Learning/KWA General).

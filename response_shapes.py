@@ -86,6 +86,10 @@ def shape_time_entries(raw_entries: list[dict]) -> list[dict]:
                                     # rows grouped from API-created entries
         "project_uri": str | None,  # set when entry is at project level (no task)
         "task_uri":    str | None,  # set when entry is at task level
+        "is_billable": bool | None, # None if Replicon never computed/stored it
+                                    # for this entry (seen on some older
+                                    # API-created rows pushed before the
+                                    # is-billable fix landed — see put_time_entry)
         "daily_hours": {            # only days with actual hours (null/zero excluded)
             "2026-06-15": 1.0,
             "2026-06-19": 1.0,
@@ -103,6 +107,7 @@ def shape_time_entries(raw_entries: list[dict]) -> list[dict]:
         "row_number": None,
         "project_uri": None,
         "task_uri": None,
+        "is_billable": None,
         "daily_hours": {},
         "daily_comments": {},    # only days with a non-empty comment
         "daily_tuleap_refs": {},  # only days with a non-empty Tuleap reference
@@ -140,6 +145,8 @@ def shape_time_entries(raw_entries: list[dict]) -> list[dict]:
             row["project_uri"] = meta["project"].get("uri")
         if row["task_uri"] is None and "task" in meta:
             row["task_uri"] = meta["task"].get("uri")
+        if row["is_billable"] is None and "is-billable" in meta:
+            row["is_billable"] = meta["is-billable"].get("bool")
 
         entry_uri = entry.get("uri")
         if entry_uri:

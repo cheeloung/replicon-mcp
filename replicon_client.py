@@ -303,7 +303,8 @@ class RepliconClient:
 
     def put_time_entry(self, user_uri: str, entry_date: dict, hours: float,
                         project_uri: str, task_uri: str | None = None,
-                        comments: str = "", tuleap_ref: str = "") -> dict:
+                        comments: str = "", tuleap_ref: str = "",
+                        is_billable: bool | None = None) -> dict:
         """
         Add/update a single time entry. Uses TimeEntryService3.svc/PutTimeEntry —
         NOT PutStandardTimesheet2, which requires replacing the entire timesheet
@@ -321,6 +322,13 @@ class RepliconClient:
 
         unitOfWorkId is a caller-generated idempotency key (uuid4), consistent
         with the convention confirmed elsewhere in this API.
+
+        is_billable: explicit billable flag. Confirmed via live raw-entry
+        comparison (2026-08-05) that UI-created entries always carry an
+        is-billable custom metadata value (plus a billing-rate value when
+        True), while entries pushed through this same PutTimeEntry operation
+        without it left is-billable unset/inconsistent. Pass explicitly
+        rather than relying on Replicon to infer it for API-created entries.
         """
         custom_metadata = [
             {"keyUri": "urn:replicon:time-entry-metadata-key:project",
@@ -336,6 +344,16 @@ class RepliconClient:
                 "keyUri": "urn:replicon:time-entry-metadata-key:comments",
                 "value": {"text": comments},
             })
+        if is_billable is not None:
+            custom_metadata.append({
+                "keyUri": "urn:replicon:time-entry-metadata-key:is-billable",
+                "value": {"bool": is_billable},
+            })
+            if is_billable:
+                custom_metadata.append({
+                    "keyUri": "urn:replicon:time-entry-metadata-key:billing-rate",
+                    "value": {"uri": "urn:replicon:project-specific-billing-rate"},
+                })
 
         # Tuleap reference — stored in extensionFieldValues (separate from customMetadata)
         extension_field_values = []
@@ -353,7 +371,15 @@ class RepliconClient:
                 "target": {"parameterCorrelationId": str(uuid.uuid4())},
                 "user": {"uri": user_uri},
                 "entryDate": entry_date,
-                "timeAllocationTypeUris": ["urn:replicon:time-allocation-type:project"],
+                # Both types required — confirmed via live raw-entry comparison
+                # (2026-08-05) that UI-created entries always carry "attendance"
+                # alongside "project". Entries missing "attendance" are silently
+                # excluded from Replicon's standard timesheet report even though
+                # they're fully committed, totalled, and submittable/approvable.
+                "timeAllocationTypeUris": [
+                    "urn:replicon:time-allocation-type:attendance",
+                    "urn:replicon:time-allocation-type:project",
+                ],
                 "interval": {
                     "hours": {
                         "hours": whole_hours,

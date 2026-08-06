@@ -372,6 +372,7 @@ def stage_time_entry(
     task_name: str = "",
     comments: str = "",
     tuleap_ref: str = "",
+    is_billable: bool | None = None,
 ) -> str:
     """
     Stage a time entry locally. Nothing is sent to Replicon yet.
@@ -391,6 +392,9 @@ def stage_time_entry(
         comments:     Optional time entry comment.
         tuleap_ref:   Optional Tuleap task reference (e.g. "2327"). Written to the
                       "Reference Tuleap" extension field in Replicon on push.
+        is_billable:  Explicit billable flag (True/False). Client project work
+                      should be True; internal/non-client work (e.g. AI Learning,
+                      KWA General) should be False. Omit to leave unset.
 
     Returns the created draft record including its draft_id (needed for edits/removes).
     """
@@ -410,6 +414,7 @@ def stage_time_entry(
         task_name=task_name or None,
         comments=comments,
         tuleap_ref=tuleap_ref,
+        is_billable=is_billable,
     )
     return _pretty({"staged": draft})
 
@@ -425,6 +430,7 @@ def edit_staged_entry(
     project_name: str | None = None,
     task_uri: str | None = None,
     task_name: str | None = None,
+    is_billable: bool | None = None,
 ) -> str:
     """
     Update one or more fields on a staged (not-yet-pushed) draft entry.
@@ -438,6 +444,7 @@ def edit_staged_entry(
         entry_date: New date ("YYYY-MM-DD").
         comments:   New comments text.
         project_uri/project_name/task_uri/task_name: New project or task.
+        is_billable: New billable flag (True/False).
 
     Returns the updated draft record, or an error if the draft_id was not found.
     """
@@ -459,6 +466,8 @@ def edit_staged_entry(
         changes["task_uri"] = task_uri or None
     if task_name is not None:
         changes["task_name"] = task_name or None
+    if is_billable is not None:
+        changes["is_billable"] = is_billable
 
     updated = draft_store.update_draft(
         _my_uri, week_start, week_end, draft_id, **changes

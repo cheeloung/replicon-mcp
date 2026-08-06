@@ -86,7 +86,8 @@ def stage_entry(user_uri: str, week_start: dict, week_end: dict,
                  entry_date: dict, hours: float,
                  project_uri: str, project_name: str,
                  task_uri: str | None = None, task_name: str | None = None,
-                 comments: str = "", tuleap_ref: str = "") -> dict:
+                 comments: str = "", tuleap_ref: str = "",
+                 is_billable: bool | None = None) -> dict:
     """
     Stage a new entry locally. No Replicon call at all — pure local write.
     Caller (server.py) is responsible for having already resolved
@@ -96,6 +97,7 @@ def stage_entry(user_uri: str, week_start: dict, week_end: dict,
     return draft_store.add_draft(
         user_uri, week_start, week_end, entry_date, hours,
         project_uri, project_name, task_uri, task_name, comments, tuleap_ref,
+        is_billable,
     )
 
 
@@ -152,6 +154,7 @@ def push_drafts(client: RepliconClient, user_uri: str,
                 task_uri=draft.get("task_uri"),
                 comments=draft.get("comments", ""),
                 tuleap_ref=draft.get("tuleap_ref", ""),
+                is_billable=draft.get("is_billable"),
             )
             time_entry_uri = result.get("uri")
             draft_store.mark_pushed(user_uri, week_start, week_end,
